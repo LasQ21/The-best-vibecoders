@@ -1,0 +1,14 @@
+{
+  "snapshot_created_at": "2026-11-15T12:57:13+00:00",
+  "max_date_modified": "2026-11-15T14:18:03.203281+02:00",
+  "feed_head_date_modified": "2026-11-15T13:32:30.083668+02:00",
+  "forward_offset": "1794742350.136.1.6d716e79da7ae74ad6576be839902576",
+  "forward_offset_method": "prev_page",
+  "feed_url_example": "https://public-api.prozorro.gov.ua/api/2.5/tenders?limit=1000&opt_fields=procuringEntity,status,procurementMethodType,dateCreated,dateModified,tenderPeriod,tenderID&offset=1794742350.136.1.6d716e79da7ae74ad6576be839902576",
+  "opt_fields": "procuringEntity,status,procurementMethodType,dateCreated,dateModified,tenderPeriod,tenderID",
+  "excluded_kinds": [
+    "defense",
+    "special"
+  ],
+  "notes": "forward_offset = prev_page.offset of the first descending page, taken when index collection started (= feed_head_date_modified). It is deliberately EARLIER than max_date_modified: tender documents were downloaded up to ~1.5h after the feed head, so a tender fetched early and changed later would be missed with a later cursor. Every feed entry returned is newer than feed_head_date_modified; entries already in tenders.csv must be upserted by tender_id. Follow next_page.uri of each response to keep polling; an empty page returns the next_page.offset to resume from. Equivalent alternative: offset=<ISO date or unix timestamp> on the ascending feed (also verified)."
+}

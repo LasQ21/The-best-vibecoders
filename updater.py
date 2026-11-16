@@ -12,23 +12,29 @@ data/tenders.csv, items.csv і awards.csv (tenders_to_tables).
 """
 
 import json
+import logging
+import os
 import ssl
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pandas as pd
 
 import app
 
+logger = logging.getLogger(__name__)
+
 # --- Налаштування -----------------------------------------------------------
 
 API_URL = "https://public-api.prozorro.gov.ua/api/2.5"
-STATE_PATH = Path(__file__).parent / "data" / "feed_state.json"
+DATA_DIR = Path(__file__).parent / "data"
+STATE_FILE = "feed_state.json"
+CSV_FILES = {"tenders": "tenders.csv", "items": "items.csv", "awards": "awards.csv"}
 
 FEED_PAGE_SIZE = 1000   # максимум, який віддає API за одну сторінку фіду
 FEED_FIELDS = "procuringEntity,status,procurementMethodType,dateModified,tenderID"
@@ -40,9 +46,15 @@ TRACKED_STATUSES = ("complete", "active.awarded")
 EXCLUDED_KINDS = ("defense", "special")   # оборонні замовники закриті, не чіпаємо
 COUNTED_BID_STATUSES = ("active",)        # які пропозиції рахуємо в number_of_bids
 
+# Цілі колонки з пропусками: без Int64 pandas запише 3 як «3.0», не так, як у CSV.
+INTEGER_COLUMNS = {
+    "tenders": ("number_of_bids", "n_items", "n_lots", "n_winners"),
+    "items": ("unit_price_estimated",),
+}
+
 REQUEST_TIMEOUT = 10    # секунд на один запит
 MAX_RETRIES = 4         # спроб на запит при 429, 5xx чи обриві мережі
-BACKOFF_SECONDS = 1.0   # затримка росте: 1, 2, 4, 8 с
+BACKOFF_SECONDS = 0.5   # затримка росте: 0,5, 1, 2 с (без мережі кнопка чекає ~3,5 с)
 MAX_WORKERS = 4         # паралельних запитів, щоб API не відповів 429
 
 
@@ -96,10 +108,19 @@ def get_json(url):
 
 # --- Курсор ---------------------------------------------------------------------
 
-def read_state(path=STATE_PATH):
+def read_state(data_dir=DATA_DIR):
     """Стан фіду з feed_state.json (курсор forward_offset та службові поля)."""
-    with open(path, encoding="utf-8") as file:
+    with open(Path(data_dir) / STATE_FILE, encoding="utf-8") as file:
         return json.load(file)
+
+
+def save_state(state, data_dir=DATA_DIR):
+    """Записує стан фіду. Через тимчасовий файл, щоб збій не зіпсував курсор."""
+    path = Path(data_dir) / STATE_FILE
+    temporary = path.with_suffix(".tmp")
+    with open(temporary, "w", encoding="utf-8") as file:
+        json.dump(state, file, ensure_ascii=False, indent=2)
+    os.replace(temporary, path)
 
 
 # --- Фід ----------------------------------------------------------------------------
@@ -240,7 +261,7 @@ def tender_row(tender):
     awards = _active_awards(tender)
     is_reporting = tender.get("procurementMethodType") == "reporting"
 
-    final_value = sum(_value(award.get("value"), "amount") or 0 for award in awards) or None
+    final_value = round(sum(_value(award.get("value"), "amount") or 0 for award in awards), 2) or None
     expected_value = _value(value, "amount")
     price_drop_pct = _price_drop_pct(tender, awards, final_value)
 
@@ -376,4 +397,103 @@ def tenders_to_tables(tenders):
                             columns=app.ITEMS_COLUMNS)
     awards_df = pd.DataFrame([row for t in tenders for row in award_rows(t)],
                              columns=app.AWARDS_COLUMNS)
+    for df, name in ((tenders_df, "tenders"), (items_df, "items")):
+        for column in INTEGER_COLUMNS[name]:
+            df[column] = df[column].astype("Int64")
     return tenders_df, items_df, awards_df
+
+
+# --- Upsert у CSV -----------------------------------------------------------------
+
+def _read_csv_as_text(path):
+    """CSV як текст: збережені рядки запишуться назад байт у байт, без зміни форматів."""
+    return pd.read_csv(path, dtype=str, keep_default_na=False)
+
+
+def _write_csv(df, path):
+    """Записує CSV через тимчасовий файл: або новий файл повністю, або старий без змін."""
+    temporary = Path(path).with_suffix(".tmp")
+    df.to_csv(temporary, index=False)
+    os.replace(temporary, path)
+
+
+def upsert_tables(new_tables, data_dir=DATA_DIR):
+    """Зливає нові тендери з data/*.csv. Повертає (added, updated).
+
+    updated рахує лише тендери, які справді змінилися (інша date_modified):
+    тендер, на якому стоїть курсор, приходить повторно, але це не оновлення.
+
+    Upsert, а не append: тендер, який змінився, замінює свій старий рядок.
+    Для tenders — concat + drop_duplicates("tender_id", keep="last").
+    Для items і awards старі рядки оновлених тендерів видаляємо цілком,
+    бо позиції й рішення могли змінитися, а не лише додатися.
+    """
+    new_tenders = new_tables["tenders"]
+    if new_tenders.empty:
+        return 0, 0
+    new_ids = set(new_tenders["tender_id"])
+
+    old = {name: _read_csv_as_text(Path(data_dir) / file) for name, file in CSV_FILES.items()}
+    old_modified = old["tenders"].set_index("tender_id")["date_modified"]
+    known = new_tenders[new_tenders["tender_id"].isin(old_modified.index)]
+    added = len(new_ids) - len(known)
+    updated = int((known["date_modified"] != known["tender_id"].map(old_modified)).sum())
+
+    merged = {
+        "tenders": pd.concat([old["tenders"], new_tenders])
+                     .drop_duplicates("tender_id", keep="last"),
+    }
+    for name in ("items", "awards"):
+        kept = old[name][~old[name]["tender_id"].isin(new_ids)]
+        merged[name] = pd.concat([kept, new_tables[name]])
+
+    for name, file in CSV_FILES.items():
+        _write_csv(merged[name], Path(data_dir) / file)
+    return added, updated
+
+
+# --- Головна функція ----------------------------------------------------------------
+
+def _next_cursor(entries, documents, next_offset):
+    """Курсор після запуску. Якщо частину тендерів не завантажили, починаємо з
+    найранішого з них, щоб наступний запуск їх підхопив (повтори прибере upsert)."""
+    fetched = {document["id"] for document in documents}
+    missed = [entry["dateModified"] for entry in entries if entry["id"] not in fetched]
+    return min(missed) if missed else next_offset
+
+
+def fetch_updates(limit=200, since=None, data_dir=DATA_DIR):
+    """Підтягує нові й змінені тендери з Prozorro і дописує їх у data/*.csv.
+
+    limit: скільки тендерів максимум обробити за один запуск.
+    since: datetime або ISO-рядок; якщо задано, читаємо фід від цього моменту,
+        а не від збереженого курсора (для демо: «за останню годину»).
+    Повертає app.UpdateResult(added, updated, ok, message). Ніколи не кидає
+    виняток: без інтернету чи при збої CSV лишаються як були.
+    """
+    try:
+        state = read_state(data_dir)
+        offset = since.isoformat() if isinstance(since, datetime) else (since or state["forward_offset"])
+
+        entries, next_offset = read_feed(offset, limit)
+        documents, failed = fetch_tenders([entry["id"] for entry in entries])
+        tables = dict(zip(("tenders", "items", "awards"), tenders_to_tables(documents)))
+        added, updated = upsert_tables(tables, data_dir)
+
+        state["forward_offset"] = _next_cursor(entries, documents, next_offset)
+        state["last_update_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        save_state(state, data_dir)
+    except ApiError as error:
+        logger.warning("Оновлення з Prozorro не вдалося: %s", error)
+        return app.UpdateResult(ok=False, message="Prozorro недоступний, працюємо на збережених даних")
+    except Exception as error:   # noqa: BLE001 — на демо краще повідомлення, ніж traceback
+        logger.exception("Помилка під час оновлення")
+        return app.UpdateResult(ok=False, message=f"Оновлення не вдалося: {error}")
+
+    if added or updated:
+        message = f"Додано {added}, оновлено {updated}"
+    else:
+        message = "Нових тендерів немає"
+    if failed:
+        message += f" (не завантажилось {failed}, спробуємо наступного разу)"
+    return app.UpdateResult(added=added, updated=updated, ok=True, message=message)

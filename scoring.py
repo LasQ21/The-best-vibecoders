@@ -1,13 +1,25 @@
-"""Підсумковий бал підозрілості тендера (0–100).
+"""Підсумковий бал підозрілості тендера (0–100) і агрегати для сайту.
 
-score_tenders(flags, ml_scores=None) об'єднує прапорці з flags.compute_flags()
-і оцінку аномальності з ml.anomaly_scores() в одну таблицю для сайту.
+Публічні функції (див. CONTRACT.md):
+    score_tenders(tenders, items, awards=None) -> єдина таблиця, яку читає сайт
+    overview_metrics(tenders, scores)          -> цифри для сторінки «Огляд»
+    buyer_summary(tenders, scores, awards)     -> зведення по замовниках
 """
 
-from flags import (FLAG_COLUMNS, REASON_SEPARATOR, buyer_single_bid_stats,
-                   buyer_top_suppliers)
+import logging
+import math
 
-# Ваги складових. Сума = 100, тож тендер з усіма прапорцями і ml_score = 1 отримує 100.
+import app
+from flags import (FLAG_COLUMNS, PRICE_RATIO_THRESHOLD, REASON_SEPARATOR,
+                   buyer_single_bid_stats, buyer_top_suppliers, compute_flags,
+                   competitive_tenders, to_float)
+
+logger = logging.getLogger(__name__)
+
+# --- Ваги ---------------------------------------------------------------------
+
+# Кожна складова від 0 до 1, сума ваг 100: тендер з усіма прапорцями на максимумі
+# і ml_score = 1 отримує 100.
 WEIGHTS = {
     "flag_price": 30,          # переплата: найпряміша ознака втрат
     "flag_single_bid": 20,
@@ -16,23 +28,57 @@ WEIGHTS = {
     "ml_score": 20,
 }
 
-# З якого балу тендер вважаємо «з високим балом» на сторінці «Огляд».
-HIGH_SCORE_THRESHOLD = 50
+# Переплата важить більше, що вона більша: ×2 дає половину ваги, ×10 і більше — повну.
+PRICE_MIN_STRENGTH = 0.5
+PRICE_FULL_RATIO = 10.0
+# Підозра на різну фасовку (штука = упаковка?) не важить більше за мінімальну переплату,
+# інакше топ заповнять ліки, де просто порівняли ампулу з коробкою.
+PRICE_NEEDS_CHECK_MAX_STRENGTH = 0.5
+# Один учасник важить від половини до повної ваги залежно від того, як часто
+# в цього замовника тендери проходять без конкуренції.
+SINGLE_BID_MIN_STRENGTH = 0.5
 
-# Замовників з меншою кількістю конкурентних тендерів не ранжуємо: частки там випадкові.
-MIN_BUYER_TENDERS = 20
+# --- Агрегати -------------------------------------------------------------------
 
-OUTPUT_COLUMNS = ["tender_id", *FLAG_COLUMNS, "price_ratio", "ml_score",
-                  "total_score", "reasons"]
+HIGH_SCORE_THRESHOLD = 40    # «високий бал»: ≈ 1% тендерів (171 з 17 981)
+MIN_BUYER_TENDERS = 20       # менших замовників не ранжуємо: частки там випадкові
 
 
-def score_tenders(flags, ml_scores=None):
-    """Таблиця для сайту: по рядку на тендер, відсортована за total_score.
+# --- Бал ------------------------------------------------------------------------
 
-    flags: результат flags.compute_flags().
-    ml_scores: результат ml.anomaly_scores() з колонками tender_id, ml_score (0–1)
-        і за бажанням ml_reason. Якщо ML ще не готовий (None), бал рахується лише
-        з прапорців і масштабується до тих самих 0–100.
+def price_strength(flags):
+    """Сила прапорця переплати від 0 до 1 (логарифмічна шкала від порогу до ×10)."""
+    ratio = flags["price_ratio"].fillna(0).clip(lower=PRICE_RATIO_THRESHOLD)
+    progress = (ratio / PRICE_RATIO_THRESHOLD).map(math.log) / math.log(
+        PRICE_FULL_RATIO / PRICE_RATIO_THRESHOLD)
+    strength = (PRICE_MIN_STRENGTH + (1 - PRICE_MIN_STRENGTH) * progress).clip(upper=1)
+    if "price_needs_check" in flags:
+        capped = strength.clip(upper=PRICE_NEEDS_CHECK_MAX_STRENGTH)
+        strength = strength.where(flags["price_needs_check"] == 0, capped)
+    return strength * flags["flag_price"]
+
+
+def single_bid_strength(flags):
+    """Сила прапорця «один учасник»: більша, якщо в замовника це система."""
+    share = flags.get("buyer_single_share", 0.0)
+    return (SINGLE_BID_MIN_STRENGTH + (1 - SINGLE_BID_MIN_STRENGTH) * share) * flags["flag_single_bid"]
+
+
+def score_components(flags):
+    """Складові балу від 0 до 1 для кожного тендера (ключі як у WEIGHTS)."""
+    return {
+        "flag_price": price_strength(flags),
+        "flag_single_bid": single_bid_strength(flags),
+        "flag_repeat_winner": flags["flag_repeat_winner"],
+        "flag_short_period": flags["flag_short_period"],
+        "ml_score": flags["ml_score"],
+    }
+
+
+def combine_scores(flags, ml_scores=None):
+    """Прапорці + ML -> таблиця app.SCORE_COLUMNS, відсортована за total_score.
+
+    Якщо ML немає (None), бал рахується лише з прапорців і масштабується до 0–100.
     """
     scores = flags.copy()
     weights = dict(WEIGHTS)
@@ -47,12 +93,37 @@ def score_tenders(flags, ml_scores=None):
         if "ml_reason" in scores:
             scores["reasons"] = _append_reason(scores["reasons"], scores["ml_reason"])
 
-    weighted_sum = sum(scores[column] * weight for column, weight in weights.items())
-    scores["total_score"] = (weighted_sum / sum(weights.values()) * 100).round(1)
+    components = score_components(scores)
+    weighted_sum = sum(components[name] * weight for name, weight in weights.items())
+    scores["total_score"] = (weighted_sum / sum(weights.values()) * 100).round(1).clip(0, 100)
 
     scores = scores.sort_values(["total_score", "price_ratio"], ascending=False,
                                 na_position="last")
-    return scores[OUTPUT_COLUMNS].reset_index(drop=True)
+    return scores[list(app.SCORE_COLUMNS)].reset_index(drop=True)
+
+
+def score_tenders(tenders, items, awards=None):
+    """Єдина функція ядра для сайту: прапорці + ML + підсумковий бал.
+
+    Вхід: tenders, items, awards з data_loader.load_data() (awards необов'язкові,
+    але з ними точніше рахуються переможці багатолотових тендерів).
+    Вихід: колонки рівно app.SCORE_COLUMNS, відсортовані за total_score спадно.
+    """
+    flags = compute_flags(tenders, items, awards)
+    return combine_scores(flags, safe_anomaly_scores(tenders, flags))
+
+
+def safe_anomaly_scores(tenders, flags):
+    """ml.anomaly_scores(), але без падіння сайту: якщо ML зламався, повертає None.
+
+    Імпорт усередині, щоб навіть помилка імпорту ml.py чи sklearn не зупинила демо.
+    """
+    try:
+        import ml
+        return ml.anomaly_scores(tenders, flags)
+    except Exception:   # noqa: BLE001 — на демо краще бал без ML, ніж traceback
+        logger.exception("ML недоступний, рахуємо бал лише з прапорців")
+        return None
 
 
 def _append_reason(reasons, extra):
@@ -60,6 +131,24 @@ def _append_reason(reasons, extra):
     extra = extra.fillna("")
     joined = reasons.str.cat(extra, sep=REASON_SEPARATOR)
     return joined.where((reasons != "") & (extra != ""), reasons + extra)
+
+
+# --- Агрегати для сторінок сайту ---------------------------------------------------
+
+def overview_metrics(tenders, scores, high_score=HIGH_SCORE_THRESHOLD):
+    """Головні цифри для сторінки «Огляд» (словник, готовий для st.metric)."""
+    competitive = competitive_tenders(tenders)
+    single = (to_float(competitive["number_of_bids"]) == 1).mean() if len(competitive) else 0.0
+    high_ids = scores.loc[scores["total_score"] >= high_score, "tender_id"]
+    high_value = to_float(tenders.loc[tenders["tender_id"].isin(high_ids), "final_value"]).sum()
+    return {
+        "tenders": len(tenders),
+        "competitive_tenders": len(competitive),
+        "single_bid_share": round(float(single), 3),
+        "high_score_tenders": len(high_ids),
+        "high_score_value_uah": round(float(high_value), 2),
+        "flag_counts": {column: int(scores[column].sum()) for column in FLAG_COLUMNS},
+    }
 
 
 def buyer_summary(tenders, scores, awards=None, min_tenders=MIN_BUYER_TENDERS):
@@ -87,8 +176,9 @@ def buyer_summary(tenders, scores, awards=None, min_tenders=MIN_BUYER_TENDERS):
     summary = buyers.join([single, top, score_stats])
     summary["competitive_tenders"] = summary["competitive_tenders"].fillna(0).astype(int)
     summary["top_supplier_wins"] = summary["top_supplier_wins"].fillna(0).astype(int)
+    summary["high_score_tenders"] = summary["high_score_tenders"].fillna(0).astype(int)
     for column in ("single_bid_share", "top_supplier_share", "mean_score"):
-        summary[column] = summary[column].round(3)
+        summary[column] = summary[column].astype(float).round(3)
 
     summary["enough_data"] = summary["competitive_tenders"] >= min_tenders
     summary = summary.sort_values(["enough_data", "mean_score"], ascending=False)

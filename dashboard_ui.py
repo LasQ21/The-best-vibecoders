@@ -28,6 +28,8 @@ SIGNALS = {
 }
 PROCEDURE_COLORS = ("#1d6b55", "#9dcb54", "#f1bc69", "#6d91bd")
 TELEGRAM_BOT = "prozzoro_detector_bot"
+TELEGRAM_URL = f"https://t.me/{TELEGRAM_BOT}"
+TELEGRAM_QR = data.ROOT / "assets" / "telegram-bot-qr.png"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -156,6 +158,11 @@ def sidebar(dataset):
         if notice:
             st.success(notice)
         st.toggle("Анімації", value=True, key="motion_enabled")
+        if st.session_state["page"] != "Огляд":  # на «Огляді» є повний блок з QR
+            st.divider()
+            with st.container(key="sidebar_telegram"):
+                st.image(TELEGRAM_QR, width="stretch")
+                st.link_button("Telegram-бот", TELEGRAM_URL, icon=":material/send:", width="stretch")
 
 
 def tender_table(tenders, limit=100, selectable=False, focus=None):
@@ -238,6 +245,19 @@ def bars(counts, buyer_tenders=None):
     })
 
 
+def telegram_block():
+    with st.container(key="pulse_telegram", horizontal=True, vertical_alignment="center", gap="medium"):
+        st.image(TELEGRAM_QR, width=168)
+        with st.container(width="content"):
+            st.subheader("Детектор тендерів у Telegram")
+            st.markdown(
+                "Сповіщення про нові тендери з високим балом, дашборд і пошук за кодом `UA-…` "
+                "чи ЄДРПОУ просто в чаті."
+            )
+            st.caption(f"Наведи камеру телефона на QR-код або відкрий @{TELEGRAM_BOT}.")
+            st.link_button("Відкрити в Telegram", TELEGRAM_URL, icon=":material/open_in_new:")
+
+
 def show_overview(dataset):
     tenders = dataset.tenders
     metrics = data.overview_metrics(tenders, dataset.high_threshold)
@@ -272,12 +292,7 @@ def show_overview(dataset):
         ("Високий ризик", number(metrics["high_risk"]), high_note),
         ("Сума високого ризику", compact_money(metrics["high_value"]), "Фінальна вартість у гривнях"),
     ])
-    with st.container(key="pulse_telegram", horizontal=True, vertical_alignment="center", gap="medium"):
-        st.image(data.ROOT / "assets" / "telegram-bot-qr.png", width=152)
-        with st.container(width="content"):
-            st.subheader("Бот у Telegram")
-            st.caption(f"Наведи камеру на QR-код, щоб відкрити @{TELEGRAM_BOT}.")
-            st.link_button("Відкрити в Telegram", f"https://t.me/{TELEGRAM_BOT}", icon=":material/open_in_new:")
+    telegram_block()
     left, right = st.columns([1.65, 1], gap="medium")
     with left, st.container(key="pulse_discover"):
         st.subheader("Першими до перевірки" if dataset.score_source != "raw" else "Закупівлі з однією пропозицією")

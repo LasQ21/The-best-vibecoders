@@ -170,7 +170,7 @@ python -m bot
 1. Vercel → проєкт → Storage: підключити Blob-сховище (з'явиться `BLOB_READ_WRITE_TOKEN`).
 2. Vercel → Settings → Environment Variables: `BOT_TOKEN`, `ADMIN_IDS` (наприклад, `@ваш_юзернейм`), `CRON_SECRET` (довгий випадковий рядок). `WEBAPP_URL` можна не задавати — візьметься `https://<production-домен>/app`.
 3. GitHub → Settings → Secrets and variables → Actions: секрет `CRON_SECRET` з тим самим значенням.
-4. Після деплою один раз відкрити `https://<домен>/tg/setup?key=<CRON_SECRET>`: бот поставить вебхук, команди й кнопку меню «Дашборд». Далі це перевіряється автоматично під час `/cron/poll`.
+4. Після деплою відкрити `https://<домен>/healthz`: перший запит до production-деплою сам ставить вебхук, команди й кнопку меню «Дашборд» (у відповіді `"webhook_ready": true`). Примусово перевстановити — `https://<домен>/tg/setup?key=<CRON_SECRET>`.
 5. Production-домен має бути без Vercel Authentication (стандартний захист його не закриває), інакше Telegram не достукається до вебхука.
 
 ### Тести

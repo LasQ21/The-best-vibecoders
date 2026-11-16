@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -57,23 +58,29 @@ def _int(env, key, default):
 
 
 USERNAME_RE = re.compile(r"^@?([A-Za-z][A-Za-z0-9_]{3,31})$")
+LINK_PREFIX_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:t|telegram)\.me/", re.IGNORECASE)
 
 
-def _admins(raw: str) -> tuple[frozenset[int], frozenset[str]]:
-    """ADMIN_IDS: числові chat_id і/або юзернейми через кому: «123456, @bohdan»."""
-    ids, usernames = set(), set()
+def _admins(raw: str) -> tuple[frozenset[int], frozenset[str], list[str]]:
+    """ADMIN_IDS: chat_id, юзернейми чи посилання t.me через кому: «123, @bohdan, t.me/ivan».
+
+    Повертає (chat_id, юзернейми, нерозпізнані записи). Помилка в одному записі
+    не зупиняє бота: такий запис пропускаємо й пишемо в лог.
+    """
+    ids, usernames, invalid = set(), set(), []
     for part in (raw or "").replace(";", ",").split(","):
-        part = part.strip()
+        part = LINK_PREFIX_RE.sub("", part.strip()).strip().strip("/")
         if not part:
             continue
         if part.lstrip("-").isdigit():
             ids.add(int(part))
             continue
         match = USERNAME_RE.match(part)
-        if not match:
-            raise ConfigError(f"ADMIN_IDS: «{part}» — не chat_id і не юзернейм Telegram")
-        usernames.add(match.group(1).lower())
-    return frozenset(ids), frozenset(usernames)
+        if match:
+            usernames.add(match.group(1).lower())
+        else:
+            invalid.append(part)
+    return frozenset(ids), frozenset(usernames), invalid
 
 
 @dataclass(frozen=True)
@@ -132,7 +139,10 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Збирає Settings з .env і змінних оточення (оточення важливіше)."""
     if env is None:
         env = {**read_env_file(), **os.environ}
-    admin_ids, admin_usernames = _admins(env.get("ADMIN_IDS", ""))
+    admin_ids, admin_usernames, invalid_admins = _admins(env.get("ADMIN_IDS", ""))
+    if invalid_admins:
+        logging.getLogger(__name__).warning(
+            "ADMIN_IDS: пропущено %s — це не chat_id і не юзернейм Telegram", invalid_admins)
     on_vercel = bool(env.get("VERCEL"))
     webapp_url = env.get("WEBAPP_URL", "").strip().rstrip("/")
     production_host = env.get("VERCEL_PROJECT_PRODUCTION_URL", "").strip()

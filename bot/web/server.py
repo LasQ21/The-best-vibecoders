@@ -127,7 +127,8 @@ def public_base(services: Services) -> str:
 def create_app(services: Services, dispatcher=None) -> FastAPI:
     settings = services.settings
     env = make_env()
-    state = {"webhook_checked": False}
+    state = {"webhook_checked": False, "webhook_error": None}
+    webhook_lock = asyncio.Lock()
 
     from contextlib import asynccontextmanager
 
@@ -147,6 +148,32 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
     web = FastAPI(title="Prozorro radar", docs_url=None, redoc_url=None, openapi_url=None,
                   lifespan=lifespan)
     web.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    async def auto_webhook() -> None:
+        """На Vercel вебхук ставимо сам при першому запиті до production-деплою.
+
+        Без цього Telegram не знає, куди слати повідомлення, а ручний /tg/setup
+        легко забути. Ідемпотентно: getWebhookInfo, і set_webhook лише якщо адреса інша.
+        """
+        if state["webhook_checked"] or not settings.on_vercel or dispatcher is None:
+            return
+        if os.environ.get("VERCEL_ENV", "production") != "production":
+            return
+        async with webhook_lock:
+            if state["webhook_checked"]:
+                return
+            try:
+                await asyncio.wait_for(ensure_webhook(), timeout=15)
+                state["webhook_error"] = None
+            except Exception as error:
+                state["webhook_error"] = type(error).__name__
+                logger.exception("Не вдалося автоматично налаштувати вебхук")
+
+    @web.middleware("http")
+    async def webhook_on_first_request(request: Request, call_next):
+        if not state["webhook_checked"] and not request.url.path.startswith(("/tg/", "/static/", "/vendor/")):
+            await auto_webhook()
+        return await call_next(request)
 
     def render(name: str, status: int = 200, **context) -> HTMLResponse:
         html = env.get_template(name).render(**context)
@@ -200,6 +227,9 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
             "last_poll_success": status.get("last_success").isoformat() if status.get("last_success") else None,
             "mode": "vercel" if settings.on_vercel else "process",
             "bot": bool(settings.bot_token),
+            "webhook_ready": state["webhook_checked"],
+            "webhook_error": state["webhook_error"],
+            "dashboard": bool(settings.webapp_url),
         }
 
     # --- екрани ------------------------------------------------------------------------------

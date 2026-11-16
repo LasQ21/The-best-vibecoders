@@ -4,8 +4,11 @@
 (data/feed_state.json), відкидаємо те, що не аналізуємо, і завантажуємо
 повні документи тендерів.
 
-Тут лише мережева частина. Будь-яка помилка мережі стає ApiError,
-щоб fetch_updates() міг спіймати її в одному місці й не впасти.
+Будь-яка помилка мережі стає ApiError, щоб fetch_updates() міг спіймати
+її в одному місці й не впасти.
+
+Повні документи перетворюються на рядки з тими самими колонками, що в
+data/tenders.csv, items.csv і awards.csv (tenders_to_tables).
 """
 
 import json
@@ -15,7 +18,12 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
+
+import pandas as pd
+
+import app
 
 # --- Налаштування -----------------------------------------------------------
 
@@ -30,6 +38,7 @@ MAX_FEED_PAGES = 30     # запобіжник: не гортати фід бе�
 TRACKED_METHODS = ("aboveThreshold", "priceQuotation", "belowThreshold", "reporting")
 TRACKED_STATUSES = ("complete", "active.awarded")
 EXCLUDED_KINDS = ("defense", "special")   # оборонні замовники закриті, не чіпаємо
+COUNTED_BID_STATUSES = ("active",)        # які пропозиції рахуємо в number_of_bids
 
 REQUEST_TIMEOUT = 10    # секунд на один запит
 MAX_RETRIES = 4         # спроб на запит при 429, 5xx чи обриві мережі
@@ -179,3 +188,192 @@ def fetch_tenders(tender_ids):
         results = list(pool.map(_fetch_or_none, tender_ids))
     tenders = [tender for tender in results if tender is not None]
     return tenders, len(results) - len(tenders)
+
+
+# --- Перетворення JSON у рядки CSV -------------------------------------------------
+# Колонки ті самі, що в data/*.csv (див. app.TENDERS_COLUMNS, ITEMS_COLUMNS, AWARDS_COLUMNS).
+
+def _value(obj, key):
+    """Поле з об'єкта value ({amount, currency, valueAddedTaxIncluded}) або None."""
+    return (obj or {}).get(key)
+
+
+def _days_between(start, end):
+    """Кількість днів між двома ISO-датами, округлена до сотих."""
+    if not start or not end:
+        return None
+    seconds = (datetime.fromisoformat(end) - datetime.fromisoformat(start)).total_seconds()
+    return round(seconds / 86400, 2)
+
+
+def _active_awards(tender):
+    return [award for award in tender.get("awards", []) if award.get("status") == "active"]
+
+
+def _price_drop_pct(tender, awards, final_value):
+    """Зниження ціни у % від очікуваної вартості.
+
+    У багатолотових тендерах порівнюємо лише з лотами, де є переможець:
+    нерозіграний лот не означає, що ціну знизили.
+    """
+    if final_value is None:
+        return None
+    lots = tender.get("lots", [])
+    if lots:
+        awarded_lots = {award.get("lotID") for award in awards}
+        expected = sum(_value(lot.get("value"), "amount") or 0
+                       for lot in lots if lot["id"] in awarded_lots)
+    else:
+        expected = _value(tender.get("value"), "amount")
+    if not expected:
+        return None
+    return round((expected - final_value) / expected * 100, 2)
+
+
+def tender_row(tender):
+    """Рядок для tenders.csv з повного документа тендера."""
+    buyer = tender.get("procuringEntity", {})
+    address = buyer.get("address", {})
+    value = tender.get("value", {})
+    items = tender.get("items", [])
+    period = tender.get("tenderPeriod") or {}
+    awards = _active_awards(tender)
+    is_reporting = tender.get("procurementMethodType") == "reporting"
+
+    final_value = sum(_value(award.get("value"), "amount") or 0 for award in awards) or None
+    expected_value = _value(value, "amount")
+    price_drop_pct = _price_drop_pct(tender, awards, final_value)
+
+    winner = (awards[0].get("suppliers") or [{}])[0] if awards else {}
+    winners = {supplier.get("identifier", {}).get("id")
+               for award in awards for supplier in award.get("suppliers", [])}
+    bids = [bid for bid in tender.get("bids", []) if bid.get("status") in COUNTED_BID_STATUSES]
+
+    return {
+        "tender_id": tender["id"],
+        "tender_code": tender.get("tenderID"),
+        "title": tender.get("title"),
+        "buyer_name": buyer.get("name"),
+        "buyer_edrpou": buyer.get("identifier", {}).get("id"),
+        "buyer_kind": buyer.get("kind"),
+        "buyer_region": address.get("region"),
+        "buyer_locality": address.get("locality"),
+        "method_type": tender.get("procurementMethodType"),
+        "status": tender.get("status"),
+        "main_category": tender.get("mainProcurementCategory"),
+        "cpv_main": items[0].get("classification", {}).get("id") if items else None,
+        "expected_value": expected_value,
+        "currency": _value(value, "currency"),
+        "vat_included": _value(value, "valueAddedTaxIncluded"),
+        "final_value": final_value,
+        "final_vat_included": _value(awards[0].get("value"), "valueAddedTaxIncluded") if awards else None,
+        "price_drop_pct": price_drop_pct,
+        "number_of_bids": None if is_reporting else len(bids),
+        "tender_start": period.get("startDate"),
+        "tender_end": period.get("endDate"),
+        "submission_days": _days_between(period.get("startDate"), period.get("endDate")),
+        "date_created": tender.get("dateCreated"),
+        "date_modified": tender.get("dateModified"),
+        "winner_name": winner.get("name"),
+        "winner_edrpou": winner.get("identifier", {}).get("id"),
+        "n_items": len(items),
+        "n_lots": len(tender.get("lots", [])),
+        "n_winners": len(winners - {None}),
+    }
+
+
+def _item_prices(tender):
+    """Ціна за одиницю для кожної позиції: item_id -> (ціна, ПДВ, джерело, оцінена?).
+
+    Порядок джерел (від найточнішого):
+    1. contract_item — ціна з позиції договору (у priceQuotation з /contracts/{id});
+    2. tender_item — ціна, вказана в позиції тендера (буває в reporting);
+    3. estimated_from_award — сума рішення ÷ кількість, лише якщо в лоті одна позиція.
+    """
+    prices = {}
+    for contract in tender.get("contracts_full", []):
+        for item in contract.get("items", []):
+            unit_value = item.get("unit", {}).get("value")
+            if unit_value and unit_value.get("amount") is not None:
+                prices[item["id"]] = (unit_value["amount"], unit_value.get("valueAddedTaxIncluded"),
+                                      "contract_item", 0)
+    for item in tender.get("items", []):
+        unit_value = item.get("unit", {}).get("value")
+        if item["id"] not in prices and unit_value and unit_value.get("amount") is not None:
+            prices[item["id"]] = (unit_value["amount"], unit_value.get("valueAddedTaxIncluded"),
+                                  "tender_item", 0)
+
+    items_per_lot = {}
+    for item in tender.get("items", []):
+        items_per_lot.setdefault(item.get("relatedLot"), []).append(item)
+    for award in _active_awards(tender):
+        lot_items = items_per_lot.get(award.get("lotID"), [])
+        if len(lot_items) != 1:
+            continue
+        item = lot_items[0]
+        amount, quantity = _value(award.get("value"), "amount"), item.get("quantity")
+        if item["id"] not in prices and amount is not None and quantity:
+            prices[item["id"]] = (round(amount / quantity, 4),
+                                  _value(award.get("value"), "valueAddedTaxIncluded"),
+                                  "estimated_from_award", 1)
+    return prices
+
+
+def item_rows(tender):
+    """Рядки для items.csv: по одному на позицію тендера."""
+    prices = _item_prices(tender)
+    currency = _value(tender.get("value"), "currency")
+    rows = []
+    for item in tender.get("items", []):
+        unit = item.get("unit", {})
+        classification = item.get("classification", {})
+        price, vat, source, estimated = prices.get(item["id"], (None, None, None, None))
+        rows.append({
+            "tender_id": tender["id"],
+            "item_id": item["id"],
+            "description": item.get("description"),
+            "cpv_id": classification.get("id"),
+            "cpv_description": classification.get("description"),
+            "quantity": item.get("quantity"),
+            "unit_code": unit.get("code"),
+            "unit_name": unit.get("name"),
+            "unit_price": price,
+            "currency": currency,
+            "unit_price_estimated": estimated,
+            "unit_price_vat_included": vat,
+            "price_source": source,
+            "lot_id": item.get("relatedLot"),
+            "profile_id": item.get("profile"),
+            "category_id": item.get("category"),
+        })
+    return rows
+
+
+def award_rows(tender):
+    """Рядки для awards.csv: усі рішення тендера, з будь-яким статусом."""
+    rows = []
+    for award in tender.get("awards", []):
+        supplier = (award.get("suppliers") or [{}])[0]
+        rows.append({
+            "tender_id": tender["id"],
+            "award_id": award["id"],
+            "status": award.get("status"),
+            "supplier_name": supplier.get("name"),
+            "supplier_edrpou": supplier.get("identifier", {}).get("id"),
+            "value": _value(award.get("value"), "amount"),
+            "date": award.get("date"),
+            "lot_id": award.get("lotID"),
+            "currency": _value(award.get("value"), "currency"),
+            "vat_included": _value(award.get("value"), "valueAddedTaxIncluded"),
+        })
+    return rows
+
+
+def tenders_to_tables(tenders):
+    """Список повних документів -> три DataFrame з колонками як у data/*.csv."""
+    tenders_df = pd.DataFrame([tender_row(t) for t in tenders], columns=app.TENDERS_COLUMNS)
+    items_df = pd.DataFrame([row for t in tenders for row in item_rows(t)],
+                            columns=app.ITEMS_COLUMNS)
+    awards_df = pd.DataFrame([row for t in tenders for row in award_rows(t)],
+                             columns=app.AWARDS_COLUMNS)
+    return tenders_df, items_df, awards_df

@@ -39,6 +39,9 @@ CSV_FILES = {"tenders": "tenders.csv", "items": "items.csv", "awards": "awards.c
 FEED_PAGE_SIZE = 1000   # максимум, який віддає API за одну сторінку фіду
 FEED_FIELDS = "procuringEntity,status,procurementMethodType,dateModified,tenderID"
 MAX_FEED_PAGES = 30     # запобіжник: не гортати фід безкінечно за один запуск
+# Скільки тендерів обробляти за одне натискання кнопки. 30 — це 2–3,5 с
+# (з них ~1,5 с перезапис CSV), а 200 — понад 12 с, задовго для демо.
+UPDATE_LIMIT = 30
 
 # Що аналізуємо: ті самі типи процедур і статуси, що й у data/tenders.csv.
 TRACKED_METHODS = ("aboveThreshold", "priceQuotation", "belowThreshold", "reporting")
@@ -462,7 +465,7 @@ def _next_cursor(entries, documents, next_offset):
     return min(missed) if missed else next_offset
 
 
-def fetch_updates(limit=200, since=None, data_dir=DATA_DIR):
+def fetch_updates(limit=UPDATE_LIMIT, since=None, data_dir=DATA_DIR):
     """Підтягує нові й змінені тендери з Prozorro і дописує їх у data/*.csv.
 
     limit: скільки тендерів максимум обробити за один запуск.

@@ -102,7 +102,7 @@ tenders, items, awards = load_data()
 - Ваги задаються константами вгорі `scoring.py`, сума ваг 100. Стартова пропозиція: ціна 30, один учасник 20, постійний переможець 20, короткий строк 10, ML 20.
 - Назву замовника, регіон, суму тощо сайт бере з `tenders` через `merge` по `tender_id`. У `scores` ці колонки не дублюємо.
 
-### `updater.fetch_updates(limit: int = 200) -> app.UpdateResult`
+### `updater.fetch_updates(limit: int = 30) -> app.UpdateResult`
 
 ```python
 UpdateResult(added: int, updated: int, ok: bool, message: str)

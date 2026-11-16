@@ -1,0 +1,10 @@
+<p class="count-line">{{ total|plural(TENDER_FORMS) }}{% if total and threshold %} · з балом від {{ threshold }} — помаранчеві{% endif %}</p>
+<div class="card flush" style="margin-top: 8px">
+  {% if rows %}
+  <div class="rows">
+    {% include "tender_rows.html" %}
+  </div>
+  {% else %}
+  <div class="empty"><b>Нічого не знайдено</b>Зніміть частину фільтрів або зменште мінімальний бал.</div>
+  {% endif %}
+</div>

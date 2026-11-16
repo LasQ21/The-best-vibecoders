@@ -1,0 +1,18 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "regions": [
+    "fra1"
+  ],
+  "functions": {
+    "bot/vercel_app.py": {
+      "maxDuration": 300,
+      "excludeFiles": "{tests/**,sample_scores.csv,.streamlit/**,bot_data/**,*.md}"
+    }
+  },
+  "crons": [
+    {
+      "path": "/cron/poll",
+      "schedule": "17 6 * * *"
+    }
+  ]
+}

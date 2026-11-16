@@ -1,0 +1,125 @@
+{% from "_macros.html" import titlebar, footer, chevron %}
+{% set total = t.total_score|sf(0) %}
+{% set circumference = 339.29 %}
+{% set url = t|tender_url %}
+<section class="screen" data-screen="tender" data-tab="tenders" data-title="Тендер">
+  {{ titlebar("Тендер", t.tender_code or "", back=True) }}
+
+  <div class="card">
+    <div class="hero">
+      <div class="ring" role="img" aria-label="Бал {{ total|score }} зі 100">
+        <svg viewBox="0 0 120 120"><circle class="track" cx="60" cy="60" r="54" fill="none" stroke-width="10"/>
+          <circle class="value" cx="60" cy="60" r="54" fill="none" stroke-width="10"
+                  stroke-dasharray="{{ circumference }}" stroke-dashoffset="{{ circumference }}"
+                  data-offset="{{ '%.2f'|format(circumference * (1 - (total if total < 100 else 100) / 100)) }}"/></svg>
+        <div class="label"><b class="num">{{ total|score }}</b><span>зі 100</span></div>
+      </div>
+      <div class="what">
+        <h1>{{ t.title|clean or "—" }}</h1>
+        <p class="code">{{ t|procedure }} · {{ t.category or "—" }}</p>
+      </div>
+    </div>
+    {% if t.buyer_edrpou and not (t.buyer_edrpou|missing) %}
+    <a class="buyer-link" href="#" data-nav="buyers/{{ t.buyer_edrpou }}">
+      <div class="body">
+        <small>Замовник · {{ t.buyer_region|region }}</small>
+        {{ t.buyer_name|buyer(t.buyer_edrpou) }}
+      </div>
+      {{ chevron() }}
+    </a>
+    {% endif %}
+  </div>
+
+  {% set reasons = t.reasons|reasons %}
+  <div class="card">
+    <h2>Чому в списку</h2>
+    {% if reasons %}
+    <ul class="reasons">{% for r in reasons %}<li>{{ r }}</li>{% endfor %}</ul>
+    {% elif t.method_type == "reporting" %}
+    <p class="lede" style="margin: 0">Прямий договір: учасників і строків подачі немає, тому прапорці не рахуються.</p>
+    {% else %}
+    <p class="lede" style="margin: 0">Жоден прапорець не спрацював, модель не бачить нічого нетипового.</p>
+    {% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Прапорці</h2>
+    <div class="flag-list">
+      {% for flag in FLAG_COLUMNS %}
+      {% set on = flag in flags %}
+      <div class="flag-item {{ 'on' if on else '' }}">
+        <span class="mark" aria-hidden="true">{{ "!" if on else "·" }}</span>
+        <div class="body">{{ FLAG_LABELS[flag] }}<small>{{ FLAG_HINTS[flag] }}</small></div>
+        <span class="w">{{ "до " ~ max_weights[flag] ~ " балів" if on else "не спрацював" }}</span>
+      </div>
+      {% endfor %}
+      <div class="flag-item {{ 'on' if (t.ml_score|sf(0)) >= 0.5 else '' }}">
+        <span class="mark" aria-hidden="true">ML</span>
+        <div class="body">Модель нетиповості<small>IsolationForest: оцінка {{ (t.ml_score|sf(0))|score }} з 1, вага до {{ max_weights['ml_score'] }} балів</small></div>
+        <span class="w">{{ ((t.ml_score|sf(0)) * max_weights['ml_score'])|score }} б.</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Факти</h2>
+    <dl class="facts-grid">
+      <div><dt>Сума</dt><dd class="num">{{ t|tender_amount }}</dd></div>
+      <div><dt>Очікувана</dt><dd class="num">{{ t.expected_value|amount(t.currency) }}</dd></div>
+      <div><dt>Учасників</dt><dd class="num">{{ t|bids }}</dd></div>
+      <div><dt>Зниження ціни</dt><dd class="num">{{ ((t.price_drop_pct|sf) / 100)|percent(1) if not (t.price_drop_pct|missing) else "—" }}</dd></div>
+      <div><dt>Строк подачі</dt><dd class="num">{{ t.submission_days|days }}</dd></div>
+      <div><dt>Змінено</dt><dd class="num">{{ t.date_modified|date }}</dd></div>
+      <div class="wide"><dt>Переможець</dt><dd>{{ (t.winner_name|short_name(90)) ~ " (" ~ t.winner_edrpou ~ ")" if not (t.winner_name|missing) else "—" }}</dd></div>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h2>Ціни позицій</h2>
+    {% if items %}
+    <p class="lede">{{ items|length }} з {{ items_total }} позицій мають реальну ціну. Риска — медіана, ×3 — край шкали. Натисніть позицію, щоб побачити розподіл цін.</p>
+    <div class="items">
+      {% for item in items %}
+      {% set ratio = item.price_ratio|sf %}
+      {% set high = ratio == ratio and ratio >= 2 %}
+      <button type="button" class="item {{ 'selected' if loop.first else '' }}" data-fig-target="price-fig"
+              data-fig-select="/app/fig/price?tender_id={{ t.tender_id }}&item_id={{ item.item_id }}">
+        <div class="line">
+          <span class="desc">{{ item.description|clean|truncate_text(140) or "—" }}</span>
+          <span class="ratio {{ 'high' if high else '' }}">{{ ("×" ~ (ratio|score)) if ratio == ratio else "—" }}</span>
+        </div>
+        <small class="num">{{ item.unit_price|number(2) }} грн за {{ item.unit_name or "од." }}{% if not (item.group_median|missing) %} · медіана {{ item.group_median|number(2) }}{% endif %}{% if item.price_basis == "cpv" %} · грубе порівняння за CPV{% endif %}</small>
+        {% if ratio == ratio %}
+        <div class="meter"><i class="{{ 'high' if high else '' }}" style="width: {{ '%.1f'|format([ratio / 3 * 100, 100]|min) }}%"></i><b></b></div>
+        {% endif %}
+      </button>
+      {% endfor %}
+    </div>
+    <div class="fig" id="price-fig" style="margin-top: 12px" data-src="/app/fig/price?tender_id={{ t.tender_id }}&item_id={{ items[0].item_id }}"></div>
+    {% else %}
+    <p class="lede" style="margin: 0">У позиціях цього тендера немає реальних цін за одиницю — порівнювати нема з чим.</p>
+    {% endif %}
+  </div>
+
+  <div class="actions">
+    {% if url %}
+    <button class="action" type="button" data-link="{{ url }}">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>
+      Prozorro
+    </button>
+    {% endif %}
+    {% if t.buyer_edrpou and not (t.buyer_edrpou|missing) %}
+    <button class="action" type="button" data-nav="buyers/{{ t.buyer_edrpou }}">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 21V8l6-4 6 4v13M15 21V11h6v10M3 21h18"/></svg>
+      Замовник
+    </button>
+    {% endif %}
+    {% if url %}
+    <button class="action" type="button" data-share="{{ url }}" data-share-text="Тендер з балом {{ total|score }}/100: {{ t.title|clean|truncate_text(120) }}">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 15V3M7 8l5-5 5 5M5 13v6a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-6"/></svg>
+      Поділитися
+    </button>
+    {% endif %}
+  </div>
+  {{ footer() }}
+</section>

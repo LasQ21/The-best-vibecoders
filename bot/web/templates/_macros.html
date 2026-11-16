@@ -1,0 +1,47 @@
+{% macro titlebar(title, meta=None, back=False, about=False) %}
+<header class="titlebar">
+  <div>
+    <h1>{{ title }}</h1>
+    {% if meta %}<p class="meta">{{ meta }}</p>{% endif %}
+  </div>
+  {% if about %}
+  <button class="icon-btn" type="button" data-nav="about" aria-label="Як рахується бал">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9.5"/><path d="M12 11v6M12 7.5v.01"/></svg>
+  </button>
+  {% endif %}
+  {% if back %}
+  <button class="icon-btn back-fallback" type="button" data-back aria-label="Назад">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5l-7 7 7 7"/></svg>
+  </button>
+  {% endif %}
+</header>
+{% endmacro %}
+
+{% macro score_chip(value) %}
+<span class="score num" style="background: {{ value|heat }}; color: {{ value|heat_ink }}" aria-label="Бал {{ value|score }} зі 100">{{ value|score }}</span>
+{% endmacro %}
+
+{% macro chevron() %}
+<svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 5l7 7-7 7"/></svg>
+{% endmacro %}
+
+{% macro tender_row(t, show_buyer=True) %}
+<a class="row" href="#" data-nav="tenders/{{ t.tender_id }}">
+  {{ score_chip(t.total_score) }}
+  <div class="body">
+    <div class="title">{{ t.title|clean or "—" }}</div>
+    {% if show_buyer %}<div class="sub">{{ t.buyer_name|short_name(70) }} · {{ t.buyer_region|region }}</div>{% endif %}
+    {% set flags = t|active_flags %}
+    {% set n = t|bids %}
+    <div class="facts">
+      <span>{{ t|tender_amount }}</span>
+      {% if "flag_single_bid" not in flags %}<span>{% if n == "—" %}прямий договір{% elif n == "1" %}1 учасник{% else %}{{ n }} учасн.{% endif %}</span>{% endif %}
+    </div>
+    {% if flags %}<div class="flagline">{% for flag in flags %}<span class="pill">{{ FLAG_SHORT[flag] }}</span>{% endfor %}</div>{% endif %}
+  </div>
+</a>
+{% endmacro %}
+
+{% macro footer() %}
+<p class="disclaimer">{{ DISCLAIMER }}</p>
+{% endmacro %}

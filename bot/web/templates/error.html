@@ -1,0 +1,15 @@
+<section class="screen" data-screen="error" data-title="Помилка">
+  <div class="card error-box">
+    {% if status_code == 401 %}
+    <b>Відкрийте дашборд через бота</b>
+    <p>Дашборд працює всередині Telegram: натисніть кнопку «Дашборд» у чаті з ботом. Якщо він був відкритий понад добу — відкрийте знову.</p>
+    {% elif status_code == 404 %}
+    <b>Не знайдено</b>
+    <p>{{ message }}</p>
+    <p style="margin-top: 14px"><button class="btn secondary" type="button" data-back>Назад</button></p>
+    {% else %}
+    <b>Дані тимчасово недоступні</b>
+    <p>{{ message }}</p>
+    {% endif %}
+  </div>
+</section>

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="uk" data-asset="{{ ASSET_VERSION }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Радар тендерів</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Unbounded:wght@600&display=swap&subset=cyrillic">
+  <link rel="stylesheet" href="/static/app.css?v={{ ASSET_VERSION }}">
+  <script src="https://telegram.org/js/telegram-web-app.js?59"></script>
+  <script src="/static/htmx.min.js?v=2.0.11" defer></script>
+  <script src="/static/glue.js?v={{ ASSET_VERSION }}" defer></script>
+</head>
+<body>
+  <div class="backdrop" aria-hidden="true"><i class="o1"></i><i class="o2"></i><i class="o3"></i></div>
+  <main id="view" aria-live="polite">
+    <div class="skeleton" aria-label="Завантаження"><i class="h1"></i><i class="t"></i><i class="c"></i><i class="r"></i></div>
+  </main>
+
+  <template id="skeleton-tpl">
+    <div class="skeleton" aria-label="Завантаження"><i class="h1"></i><i class="t"></i><i class="c"></i><i class="r"></i></div>
+  </template>
+
+  <nav class="tabbar" aria-label="Розділи">
+    <button type="button" data-tab="overview" class="on">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M4 19V11M10 19V5M16 19v-6M22 19H2"/></svg>
+      Огляд
+    </button>
+    <button type="button" data-tab="tenders">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" aria-hidden="true"><path d="M8 6h12M8 12h12M8 18h12"/><circle cx="3.5" cy="6" r="1"/><circle cx="3.5" cy="12" r="1"/><circle cx="3.5" cy="18" r="1"/></svg>
+      Тендери
+    </button>
+    <button type="button" data-tab="buyers">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round" aria-hidden="true"><path d="M3 21V8l6-4 6 4v13M15 21V11h6v10M3 21h18M7 11h4M7 15h4"/></svg>
+      Замовники
+    </button>
+    <button type="button" data-tab="alerts">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9a6 6 0 1 1 12 0c0 6 2.5 7.5 2.5 7.5h-17S6 15 6 9z"/><path d="M10 20a2.2 2.2 0 0 0 4 0"/></svg>
+      Сповіщення
+    </button>
+  </nav>
+  <div id="toast" class="toast" role="status"></div>
+  {% if dev %}<!-- DEV_AUTH_BYPASS: тестовий користувач -->{% endif %}
+</body>
+</html>

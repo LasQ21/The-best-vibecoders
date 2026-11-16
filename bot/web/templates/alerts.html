@@ -1,0 +1,91 @@
+{% from "_macros.html" import titlebar, footer, score_chip %}
+<section class="screen" data-screen="alerts" data-tab="alerts" data-title="Сповіщення">
+  {{ titlebar("Сповіщення", "Нові тендери з високим балом — у чат", back=True) }}
+
+  <form id="alert-form" class="filters" hx-put="/app/v/alerts" hx-target="#alert-preview" hx-swap="innerHTML"
+        hx-trigger="change, input delay:400ms from:input[type=range]">
+    <div class="card">
+      <label class="switch-line">
+        <div class="body">Надсилати в чат<small>{% if bot %}Коли в тендері щойно визначили переможця і бал не нижчий за поріг{% else %}Бот ще не налаштований: сповіщення не надходитимуть{% endif %}</small></div>
+        <span class="switch"><input type="checkbox" name="active" value="1" {{ 'checked' if sub.active else '' }} aria-label="Сповіщення"><span></span></span>
+      </label>
+    </div>
+
+    <div class="card slider">
+      <div class="line"><label for="alert-score">Поріг балу</label><output id="alert-score-out" class="num">{{ sub.min_score|int }}</output></div>
+      <input id="alert-score" type="range" name="min_score" min="{{ score_range[0] }}" max="{{ score_range[1] }}" step="5" value="{{ sub.min_score|int }}" data-out="alert-score-out">
+      <div id="alert-preview">{% include "alerts_preview.html" %}</div>
+    </div>
+
+    <div class="card">
+      <details class="picker">
+        <summary><span>Регіони</span><small>{{ sub.regions|join(", ") if sub.regions else "уся країна" }}</small></summary>
+        <div class="chip-wrap">
+          {% for r in regions %}
+          <label class="chip"><input type="checkbox" name="region" value="{{ r }}" {{ 'checked' if r in sub.regions else '' }}><span>{{ r|region }}</span></label>
+          {% endfor %}
+        </div>
+      </details>
+    </div>
+
+    <div class="card">
+      <h2>Лише з прапорцями</h2>
+      <div class="chip-wrap" style="padding-top: 0">
+        {% for flag in FLAG_COLUMNS %}
+        <label class="chip"><input type="checkbox" name="flag" value="{{ flag }}" {{ 'checked' if flag in sub.flags else '' }}><span>{{ FLAG_SHORT[flag] }}</span></label>
+        {% endfor %}
+      </div>
+      <p class="lede" style="margin: 8px 0 0">Нічого не вибрано — будь-які. Вибрано кілька — достатньо одного з них.</p>
+    </div>
+  </form>
+
+  <div class="card">
+    <h2>Відстежувані замовники</h2>
+    {% if sub.buyers %}
+    <p class="lede">Для них поріг нижчий — від {{ sub.follow_min_score|int }}, і регіони з прапорцями не враховуються.</p>
+    <div class="list-plain">
+      {% for e in sub.buyers|sort %}
+      <div>
+        <a class="body" href="#" data-nav="buyers/{{ e }}" style="color: inherit">{{ (names.get(e) or "")|short_name(70) or "—" }}<small>ЄДРПОУ {{ e }}</small></a>
+        <button class="text-btn danger" type="button" hx-post="/app/v/alerts/buyers/{{ e }}?action=unfollow" hx-target="closest div" hx-swap="outerHTML">Не стежити</button>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <p class="lede" style="margin: 0">Відкрийте профіль замовника і натисніть «Стежити» — його тендери з балом від {{ sub.follow_min_score|int }} приходитимуть окремо від загального порогу.</p>
+    {% endif %}
+  </div>
+
+  {% if sub.muted %}
+  <div class="card">
+    <h2>Приховані замовники</h2>
+    <div class="list-plain">
+      {% for e in sub.muted|sort %}
+      <div>
+        <span class="body">{{ (names.get(e) or "")|short_name(70) or "—" }}<small>ЄДРПОУ {{ e }}</small></span>
+        <button class="text-btn" type="button" hx-post="/app/v/alerts/buyers/{{ e }}?action=unmute" hx-target="closest div" hx-swap="outerHTML">Показувати</button>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card flush">
+    <h2>Надіслано</h2>
+    {% if history %}
+    <div class="rows">
+      {% for h in history %}
+      {% if h.row is not none %}
+      <a class="row" href="#" data-nav="tenders/{{ h.tender_id }}">
+        {{ score_chip(h.score) }}
+        <div class="body"><div class="title">{{ h.row.title|clean }}</div><div class="sub">{{ h.sent_at|datetime }}{% if h.collapsed %} · у зведенні «ще N»{% endif %}</div></div>
+      </a>
+      {% endif %}
+      {% endfor %}
+    </div>
+    {% else %}
+    <div class="empty"><b>Поки нічого</b>Сповіщення з'являться тут, щойно бот знайде новий тендер під ваші налаштування.</div>
+    {% endif %}
+  </div>
+  {{ footer() }}
+</section>

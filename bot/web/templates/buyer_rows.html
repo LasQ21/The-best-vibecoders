@@ -1,0 +1,18 @@
+{% from "_macros.html" import score_chip %}
+{% for b in rows %}
+<a class="row" href="#" data-nav="buyers/{{ b.buyer_edrpou }}">
+  {% if b.mean_score|missing %}<span class="rank">—</span>{% else %}{{ score_chip(b.mean_score) }}{% endif %}
+  <div class="body">
+    <div class="title">{{ b.buyer_name|buyer(b.buyer_edrpou) }}</div>
+    <div class="facts">
+      <span>{{ b.buyer_region|region }}</span>
+      <span>{{ (b.tenders_total|sf(0))|int|plural(TENDER_FORMS) }}</span>
+      {% if not (b.single_bid_share|missing) %}<span>1 учасник: {{ b.single_bid_share|percent }}</span>{% endif %}
+      {% if (b.high_score_tenders|sf(0)) > 0 %}<span class="pill">{{ (b.high_score_tenders|sf(0))|int }} з високим балом</span>{% endif %}
+    </div>
+  </div>
+</a>
+{% endfor %}
+{% if more %}
+<div class="skeleton" hx-get="/app/v/buyers?part=rows&{{ next_query }}" hx-trigger="revealed" hx-swap="outerHTML"><i class="row-skeleton"></i></div>
+{% endif %}

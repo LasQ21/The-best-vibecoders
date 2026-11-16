@@ -1,0 +1,7 @@
+{% from "_macros.html" import tender_row %}
+{% for t in rows %}{{ tender_row(t) }}{% endfor %}
+{% if more %}
+<div class="skeleton" hx-get="/app/v/tenders?part=rows&{{ next_query }}" hx-trigger="revealed" hx-swap="outerHTML">
+  <i class="row-skeleton"></i>
+</div>
+{% endif %}

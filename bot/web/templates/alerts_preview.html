@@ -1,0 +1,5 @@
+<div class="preview">
+  <b class="num">{{ preview|number }}</b>
+  <p>{{ "сповіщення" if preview % 10 in (1,2,3,4) and preview % 100 not in (11,12,13,14) else "сповіщень" }} за останні 7 днів з такими налаштуваннями{% if preview > 70 %} — це більше 10 на день, варто підняти поріг{% endif %}.</p>
+</div>
+<p class="saved" role="status">{% if saved %}Збережено{% if sub.active %} · сповіщення увімкнені{% else %} · сповіщення вимкнені{% endif %}{% endif %}</p>

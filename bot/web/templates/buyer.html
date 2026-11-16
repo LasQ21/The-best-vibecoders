@@ -1,0 +1,52 @@
+{% from "_macros.html" import titlebar, footer, tender_row %}
+<section class="screen" data-screen="buyer" data-tab="buyers" data-title="Замовник">
+  {{ titlebar("Замовник", "ЄДРПОУ " ~ b.edrpou, back=True) }}
+
+  <div class="card">
+    <h1 style="font-size: 17px; font-weight: 600; line-height: 1.32">{{ b.name|clean or "—" }}</h1>
+    <p class="lede" style="margin: 6px 0 0">{{ b.region|region }}</p>
+  </div>
+
+  <div class="tiles">
+    <div class="tile"><b class="num">{{ b.tenders_total|number }}</b><span>тендерів, з них {{ b.competitive|number }} конкурентних</span></div>
+    <div class="tile"><b class="num">{{ b.single_bid_share|percent }}</b><span>конкурентних з одним учасником</span></div>
+    <div class="tile hot"><b class="num">{{ b.mean_score|score }}</b><span>середній бал · {{ b.high_count|number }} з високим</span></div>
+    <div class="tile"><b class="num">{{ b.total_value|amount }}</b><span>сума договорів</span></div>
+  </div>
+
+  {% if b.top_supplier %}
+  <div class="card">
+    <h2>Головний постачальник</h2>
+    <p style="font-weight: 500">{{ b.top_supplier.name|short_name(90) }}</p>
+    <p class="lede" style="margin: 4px 0 0">виграв {{ b.top_supplier.wins|plural(TENDER_FORMS) }} — {{ b.top_supplier.share|percent }} конкурентних тендерів замовника</p>
+    {% if not b.enough_data %}<p class="lede" style="margin: 8px 0 0">Конкурентних тендерів менше {{ 20 }} — частки можуть бути випадковими.</p>{% endif %}
+  </div>
+  {% endif %}
+
+  <div id="follow-slot">{% include "follow_button.html" %}</div>
+
+  <div class="card">
+    <h2>Хто найчастіше перемагає</h2>
+    <div class="fig" data-src="/app/fig/buyer/{{ b.edrpou }}/winners"></div>
+  </div>
+
+  <div class="card">
+    <h2>Закупівлі в часі</h2>
+    <div class="fig-tabs" role="tablist">
+      <button type="button" class="on" data-fig-target="timeline-fig" data-fig-select="/app/fig/buyer/{{ b.edrpou }}/timeline?freq=W">Тижні</button>
+      <button type="button" data-fig-target="timeline-fig" data-fig-select="/app/fig/buyer/{{ b.edrpou }}/timeline?freq=M">Місяці</button>
+    </div>
+    <div class="fig" id="timeline-fig" data-src="/app/fig/buyer/{{ b.edrpou }}/timeline?freq=W"></div>
+  </div>
+
+  <div class="card flush">
+    <h2>Тендери замовника за балом</h2>
+    <div class="rows">
+      {% for t in b.top_tenders %}{{ tender_row(t, show_buyer=False) }}{% endfor %}
+    </div>
+    {% if b.tenders_total > b.top_tenders|length %}
+    <div style="padding: 4px 16px 10px"><button class="btn secondary" type="button" data-nav="tenders?buyer={{ b.edrpou }}">Усі {{ b.tenders_total|number }}</button></div>
+    {% endif %}
+  </div>
+  {{ footer() }}
+</section>

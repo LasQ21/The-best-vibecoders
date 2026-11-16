@@ -1,0 +1,41 @@
+{% from "_macros.html" import titlebar, footer %}
+<section class="screen" data-screen="tenders" data-tab="tenders" data-title="Тендери">
+  {{ titlebar("Тендери", ("За останню добу · " if filters.since_hours else "") ~ ("Один замовник · " if filters.buyer else "") ~ "від найвищого балу", back=True) }}
+
+  <form class="filters" id="tender-filters"
+        hx-get="/app/v/tenders?part=list" hx-target="#tender-list" hx-swap="innerHTML"
+        hx-trigger="change, input delay:350ms from:input[type=range]">
+    <div class="chips" role="group" aria-label="Фільтри">
+      {% set region = filters.regions[0] if filters.regions else "" %}
+      <label class="chip-select {{ 'on' if region else '' }}">
+        <span>{{ (region|region) if region else "Уся країна" }}</span>
+        <select name="region" aria-label="Регіон" onchange="this.parentElement.classList.toggle('on', !!this.value); this.previousElementSibling.textContent = this.value ? this.options[this.selectedIndex].text : 'Уся країна'">
+          <option value="">Уся країна</option>
+          {% for r in regions %}<option value="{{ r }}" {{ 'selected' if r == region else '' }}>{{ r|region }}</option>{% endfor %}
+        </select>
+      </label>
+      {% for flag in FLAG_COLUMNS %}
+      <label class="chip"><input type="checkbox" name="flag" value="{{ flag }}" {{ 'checked' if flag in filters.flags else '' }}><span>{{ FLAG_SHORT[flag] }}</span></label>
+      {% endfor %}
+    </div>
+    <div class="chips" role="group" aria-label="Процедура і категорія">
+      {% for p in procedures %}
+      <label class="chip"><input type="checkbox" name="procedure" value="{{ p }}" {{ 'checked' if p in filters.procedures else '' }}><span>{{ p }}</span></label>
+      {% endfor %}
+      {% for c in categories %}
+      <label class="chip"><input type="checkbox" name="category" value="{{ c }}" {{ 'checked' if c in filters.categories else '' }}><span>{{ c }}</span></label>
+      {% endfor %}
+    </div>
+    <div class="card slider">
+      <div class="line"><label for="min-score">Бал не нижче</label><output id="min-score-out" class="num">{{ (filters.min_score or 0)|int }}</output></div>
+      <input id="min-score" type="range" name="min_score" min="0" max="70" step="5" value="{{ (filters.min_score or 0)|int }}" data-out="min-score-out">
+    </div>
+    {% if filters.buyer %}<input type="hidden" name="buyer" value="{{ filters.buyer }}">{% endif %}
+    {% if filters.since_hours %}<input type="hidden" name="since_hours" value="{{ filters.since_hours }}">{% endif %}
+  </form>
+
+  <div id="tender-list">
+    {% include "tender_list.html" %}
+  </div>
+  {{ footer() }}
+</section>

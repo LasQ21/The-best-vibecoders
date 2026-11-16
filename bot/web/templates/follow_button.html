@@ -1,0 +1,10 @@
+{% if followed %}
+<button class="btn on" type="button" hx-post="/app/v/buyers/{{ edrpou if edrpou is defined else b.edrpou }}/follow?on=0" hx-target="#follow-slot" hx-swap="innerHTML">
+  ✓ Ви стежите — сповіщення від балу {{ sub.follow_min_score|int }}
+</button>
+{% if not sub.active %}<p class="disclaimer" style="padding-top: 6px">Сповіщення зараз вимкнені — увімкніть їх на вкладці «Сповіщення».</p>{% endif %}
+{% else %}
+<button class="btn" type="button" hx-post="/app/v/buyers/{{ edrpou if edrpou is defined else b.edrpou }}/follow?on=1" hx-target="#follow-slot" hx-swap="innerHTML">
+  Стежити за замовником
+</button>
+{% endif %}

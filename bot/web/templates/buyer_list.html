@@ -1,0 +1,11 @@
+<p class="count-line">
+  {% if query %}Знайдено: {{ total|number }}{% if total >= 30 %}+{% endif %}
+  {% else %}Лише замовники з {{ min_tenders }}+ конкурентними тендерами: менші вибірки дають випадкові частки.{% endif %}
+</p>
+<div class="card flush" style="margin-top: 8px">
+  {% if rows %}
+  <div class="rows">{% include "buyer_rows.html" %}</div>
+  {% else %}
+  <div class="empty"><b>Замовника не знайдено</b>Спробуйте ЄДРПОУ з 8 цифр або інше слово з назви.</div>
+  {% endif %}
+</div>

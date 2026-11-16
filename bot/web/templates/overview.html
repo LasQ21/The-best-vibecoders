@@ -1,0 +1,75 @@
+{% from "_macros.html" import titlebar, tender_row, footer %}
+{% set m = o.metrics %}
+<section class="screen" data-screen="overview" data-tab="overview" data-title="Огляд">
+  {{ titlebar("Радар тендерів", "Дані оновлено " ~ ((last_success or snapshot.loaded_at)|ago), about=True) }}
+
+  <a class="card hero-glass" href="#" data-nav="tenders?min_score={{ threshold }}" style="color: inherit">
+    <div class="big num">{{ m.high_risk|number }}</div>
+    <p class="big-label">тендерів варто перевірити першими<small>бал від {{ threshold }} зі 100 — це близько 1% конкурентних закупівель</small></p>
+    <div class="mini-stats">
+      <div><b class="num">{{ m.count|number }}</b><span>тендерів за пів року</span></div>
+      <div><b class="num">{{ m.single_bid_share|percent }}</b><span>з одним учасником</span></div>
+      <div><b class="num">{{ m.high_value|amount }}</b><span>сума тендерів до перевірки</span></div>
+    </div>
+  </a>
+
+  <a class="card fresh" href="#" data-nav="tenders?since_hours=24">
+    <span class="pulse" aria-hidden="true"></span>
+    <p>
+      За добу змінилось <b>{{ o.fresh_count|number }}</b> {{ "тендер" if o.fresh_count == 1 else "тендерів" }},
+      з них з високим балом — <b>{{ o.fresh_high|number }}</b>
+      <small>до {{ o.reference|datetime }} за Києвом</small>
+    </p>
+    {% from "_macros.html" import chevron %}{{ chevron() }}
+  </a>
+
+  <div class="card flush">
+    <h2>Перші до перевірки</h2>
+    <div class="rows">
+      {% for t in top %}{{ tender_row(t) }}{% endfor %}
+    </div>
+    <div style="padding: 4px 16px 10px"><button class="btn secondary" type="button" data-tab-link data-nav="tenders">Усі тендери з балом</button></div>
+  </div>
+
+  <div class="card">
+    <h2>Як розподілені бали</h2>
+    <p class="lede">{{ o.competitive|number }} конкурентних тендерів. Помаранчеві стовпці — бал від {{ threshold }}; висота — корінь із кількості, щоб було видно хвіст.</p>
+    <div class="histo" role="img" aria-label="Розподіл балів від 0 до 100 кроком 5">
+      {% for bin in o.distribution %}
+        {% set h = ((bin.count ** 0.5) / (max_bin ** 0.5) * 100) if bin.count else 0 %}
+        <i class="{{ 'hot' if bin.start >= threshold else '' }}" style="height: {{ '%.1f'|format(h) }}%" title="{{ bin.start }}–{{ bin.start + 5 }}: {{ bin.count|number }}"></i>
+      {% endfor %}
+      <span class="mark" style="left: {{ threshold }}%"><span>{{ threshold }}</span></span>
+    </div>
+    <div class="histo-axis"><span>0</span><span>25</span><span>50</span><span>75</span><span>100</span></div>
+  </div>
+
+  <div class="card">
+    <h2>Скільки разів спрацював кожен прапорець</h2>
+    <div class="bars">
+      {% for flag, count in o.flag_counts.items() %}
+      <div class="bar-row">
+        <span>{{ FLAG_LABELS[flag] }}</span><span class="count">{{ count|number }}</span>
+        <div class="bar {{ 'hot' if flag == 'flag_price' else '' }}"><i style="width: {{ '%.1f'|format(count / max_flag * 100 if max_flag else 0) }}%"></i></div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if o.regions %}
+  <div class="card">
+    <h2>Де найбільше тендерів з високим балом</h2>
+    <div class="bars">
+      {% set top_region = o.regions[0]["count"] %}
+      {% for r in o.regions %}
+      <a class="bar-row" href="#" data-nav="tenders?region={{ r.buyer_region|urlencode }}&min_score={{ threshold }}" style="color: inherit">
+        <span>{{ r.buyer_region|region }}</span><span class="count">{{ r.count|number }}</span>
+        <div class="bar hot"><i style="width: {{ '%.1f'|format(r.count / top_region * 100) }}%"></i></div>
+      </a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
+
+  {{ footer() }}
+</section>

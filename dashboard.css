@@ -545,6 +545,20 @@
     transition: box-shadow .3s var(--ease), border-color .3s;
 }
 
+.st-key-pulse_telegram {
+    padding: clamp(.8rem, 2vw, 1.3rem);
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 1.2rem;
+    box-shadow: 0 4px 16px #243e240b;
+}
+
+.st-key-pulse_telegram [data-testid="stImage"] {
+    border: 1px solid var(--line);
+    border-radius: .8rem;
+    overflow: hidden;
+}
+
 .st-key-pulse_discover:hover, .st-key-pulse_procedures:hover {
     border-color: #c0d2b7;
     box-shadow: var(--lift);

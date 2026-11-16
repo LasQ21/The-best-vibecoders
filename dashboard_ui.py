@@ -27,6 +27,7 @@ SIGNALS = {
     "flag_short_period": "Короткий строк",
 }
 PROCEDURE_COLORS = ("#1d6b55", "#9dcb54", "#f1bc69", "#6d91bd")
+TELEGRAM_BOT = "prozzoro_detector_bot"
 LOGGER = logging.getLogger(__name__)
 
 
@@ -271,6 +272,12 @@ def show_overview(dataset):
         ("Високий ризик", number(metrics["high_risk"]), high_note),
         ("Сума високого ризику", compact_money(metrics["high_value"]), "Фінальна вартість у гривнях"),
     ])
+    with st.container(key="pulse_telegram", horizontal=True, vertical_alignment="center", gap="medium"):
+        st.image(data.ROOT / "assets" / "telegram-bot-qr.png", width=152)
+        with st.container(width="content"):
+            st.subheader("Бот у Telegram")
+            st.caption(f"Наведи камеру на QR-код, щоб відкрити @{TELEGRAM_BOT}.")
+            st.link_button("Відкрити в Telegram", f"https://t.me/{TELEGRAM_BOT}", icon=":material/open_in_new:")
     left, right = st.columns([1.65, 1], gap="medium")
     with left, st.container(key="pulse_discover"):
         st.subheader("Першими до перевірки" if dataset.score_source != "raw" else "Закупівлі з однією пропозицією")

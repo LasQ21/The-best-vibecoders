@@ -35,6 +35,27 @@ def init_data(token=TOKEN, user_id=777, auth_date=None, tamper=False):
     return urlencode(fields)
 
 
+class AdminConfigTest(unittest.TestCase):
+    def test_ids_and_usernames(self):
+        settings = load_settings({"ADMIN_IDS": "123, @Bohdan_K, other_admin"})
+        self.assertEqual(settings.admin_ids, frozenset({123}))
+        self.assertTrue(settings.is_admin(None, "bohdan_k"))
+        self.assertTrue(settings.is_admin(123))
+        self.assertFalse(settings.is_admin(5, "someone"))
+
+    def test_garbage_is_rejected(self):
+        with self.assertRaises(ConfigError):
+            load_settings({"ADMIN_IDS": "@a b"})
+
+    def test_username_admin_chat_is_remembered(self):
+        _client, services = make_client(admin_usernames=frozenset({"bohdan"}))
+        self.assertFalse(services.is_admin_chat(42, None))
+        self.assertTrue(asyncio.run(services.remember_admin(42, "Bohdan")))
+        self.assertIn(42, services.admin_chat_ids())
+        self.assertTrue(services.is_admin_chat(42, None))
+        self.assertFalse(asyncio.run(services.remember_admin(43, "stranger")))
+
+
 class AuthTest(unittest.TestCase):
     settings = Settings(bot_token=TOKEN)
 

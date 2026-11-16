@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
@@ -55,16 +56,24 @@ def _int(env, key, default):
         raise ConfigError(f"{key} має бути цілим числом") from error
 
 
-def _ids(raw: str) -> frozenset[int]:
-    ids = set()
+USERNAME_RE = re.compile(r"^@?([A-Za-z][A-Za-z0-9_]{3,31})$")
+
+
+def _admins(raw: str) -> tuple[frozenset[int], frozenset[str]]:
+    """ADMIN_IDS: числові chat_id і/або юзернейми через кому: «123456, @bohdan»."""
+    ids, usernames = set(), set()
     for part in (raw or "").replace(";", ",").split(","):
         part = part.strip()
-        if part:
-            try:
-                ids.add(int(part))
-            except ValueError as error:
-                raise ConfigError("ADMIN_IDS — це chat_id через кому") from error
-    return frozenset(ids)
+        if not part:
+            continue
+        if part.lstrip("-").isdigit():
+            ids.add(int(part))
+            continue
+        match = USERNAME_RE.match(part)
+        if not match:
+            raise ConfigError(f"ADMIN_IDS: «{part}» — не chat_id і не юзернейм Telegram")
+        usernames.add(match.group(1).lower())
+    return frozenset(ids), frozenset(usernames)
 
 
 @dataclass(frozen=True)
@@ -72,6 +81,7 @@ class Settings:
     bot_token: str = ""
     webapp_url: str = ""
     admin_ids: frozenset[int] = field(default_factory=frozenset)
+    admin_usernames: frozenset[str] = field(default_factory=frozenset)
     bot_env: str = "prod"
     poll_interval_sec: int = DEFAULT_POLL_INTERVAL_SEC
     poll_limit: int = DEFAULT_POLL_LIMIT
@@ -99,8 +109,11 @@ class Settings:
             return ""
         return hashlib.sha256(f"webhook:{self.bot_token}".encode()).hexdigest()[:48]
 
-    def is_admin(self, chat_id: int | None) -> bool:
-        return chat_id is not None and chat_id in self.admin_ids
+    def is_admin(self, chat_id: int | None, username: str | None = None) -> bool:
+        """Адміністратор за chat_id або за юзернеймом (юзернейм — лише в приватному чаті)."""
+        if chat_id is not None and chat_id in self.admin_ids:
+            return True
+        return bool(username) and username.lower() in self.admin_usernames
 
     def webapp_link(self, screen: str = "") -> str:
         """Адреса Mini App, що одразу відкриває потрібний екран (?s=tender/<id>).
@@ -119,6 +132,7 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Збирає Settings з .env і змінних оточення (оточення важливіше)."""
     if env is None:
         env = {**read_env_file(), **os.environ}
+    admin_ids, admin_usernames = _admins(env.get("ADMIN_IDS", ""))
     on_vercel = bool(env.get("VERCEL"))
     webapp_url = env.get("WEBAPP_URL", "").strip().rstrip("/")
     production_host = env.get("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
@@ -133,7 +147,8 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     settings = Settings(
         bot_token=env.get("BOT_TOKEN", "").strip(),
         webapp_url=webapp_url,
-        admin_ids=_ids(env.get("ADMIN_IDS", "")),
+        admin_ids=admin_ids,
+        admin_usernames=admin_usernames,
         bot_env=(env.get("BOT_ENV", "") or "prod").strip().lower(),
         poll_interval_sec=max(30, _int(env, "POLL_INTERVAL_SEC", DEFAULT_POLL_INTERVAL_SEC)),
         poll_limit=max(1, _int(env, "POLL_LIMIT", DEFAULT_POLL_LIMIT)),

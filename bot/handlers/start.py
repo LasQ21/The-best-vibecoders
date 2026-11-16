@@ -35,6 +35,11 @@ async def cmd_start(message: Message, command: CommandObject, services: Services
         return
     sub = services.storage.get_subscription(message.chat.id)
     await message.answer(WELCOME, reply_markup=keyboards.start_keyboard(services.settings, sub.active))
+    user = message.from_user
+    if message.chat.type == "private" and user is not None \
+            and await services.remember_admin(message.chat.id, user.username):
+        await message.answer(f"Ви адміністратор (@{fmt.esc(user.username)}). Ваш chat_id: "
+                             f"<code>{message.chat.id}</code>. Доступні /update, /status, /demo_alert.")
 
 
 @router.message(Command("about"))

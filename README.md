@@ -146,7 +146,7 @@ pip install -r requirements-bot.txt
 cp .env.example .env
 ```
 
-Заповніть у `.env` щонайменше `BOT_TOKEN` (від @BotFather) і `ADMIN_IDS`. Mini App відкривається лише за HTTPS, тож для дашборда потрібен тунель до `127.0.0.1:8000` і його адреса з `/app` у `WEBAPP_URL`. Без `WEBAPP_URL` бот працює без кнопок дашборда.
+Заповніть у `.env` щонайменше `BOT_TOKEN` (від @BotFather) і `ADMIN_IDS` — юзернейми адміністраторів (`@name`) і/або їхні chat_id через кому. Адміністратор за юзернеймом один раз надсилає боту `/start`, після чого бот пише йому службові повідомлення. Mini App відкривається лише за HTTPS, тож для дашборда потрібен тунель до `127.0.0.1:8000` і його адреса з `/app` у `WEBAPP_URL`. Без `WEBAPP_URL` бот працює без кнопок дашборда.
 
 ```bash
 python -m bot
@@ -168,7 +168,7 @@ python -m bot
 Що налаштувати один раз:
 
 1. Vercel → проєкт → Storage: підключити Blob-сховище (з'явиться `BLOB_READ_WRITE_TOKEN`).
-2. Vercel → Settings → Environment Variables: `BOT_TOKEN`, `ADMIN_IDS`, `CRON_SECRET` (довгий випадковий рядок). `WEBAPP_URL` можна не задавати — візьметься `https://<production-домен>/app`.
+2. Vercel → Settings → Environment Variables: `BOT_TOKEN`, `ADMIN_IDS` (наприклад, `@ваш_юзернейм`), `CRON_SECRET` (довгий випадковий рядок). `WEBAPP_URL` можна не задавати — візьметься `https://<production-домен>/app`.
 3. GitHub → Settings → Secrets and variables → Actions: секрет `CRON_SECRET` з тим самим значенням.
 4. Після деплою один раз відкрити `https://<домен>/tg/setup?key=<CRON_SECRET>`: бот поставить вебхук, команди й кнопку меню «Дашборд». Далі це перевіряється автоматично під час `/cron/poll`.
 5. Production-домен має бути без Vercel Authentication (стандартний захист його не закриває), інакше Telegram не достукається до вебхука.

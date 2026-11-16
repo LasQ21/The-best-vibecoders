@@ -30,6 +30,7 @@ BOT_COMMANDS = [
     ("alerts", "Сповіщення: стан і поріг"),
     ("about", "Як рахується бал"),
 ]
+ADMIN_CHATS_KEY = "admin_chats"
 ADMIN_COMMANDS = [("update", "Позачерговий цикл опитування"), ("status", "Стан опитування"),
                   ("demo_alert", "Демо-сповіщення")]
 
@@ -80,11 +81,42 @@ class Services:
     poller: object | None = None
     extra: dict = field(default_factory=dict)
 
+    def admin_chat_ids(self) -> set[int]:
+        """chat_id з ADMIN_IDS плюс запам'ятовані для адміністраторів, вказаних юзернеймом."""
+        remembered = self.storage.get_json(ADMIN_CHATS_KEY, {}) or {}
+        return set(self.settings.admin_ids) | {int(chat_id) for chat_id in remembered.values()}
+
+    def is_admin_chat(self, chat_id: int | None, username: str | None, private: bool = True) -> bool:
+        if chat_id is not None and chat_id in self.admin_chat_ids():
+            return True
+        return private and self.settings.is_admin(None, username)
+
+    async def remember_admin(self, chat_id: int, username: str | None) -> bool:
+        """Адміністратор за юзернеймом написав боту: запам'ятати його chat_id.
+
+        Telegram не дає боту писати людині за юзернеймом, лише за chat_id, тому
+        службові повідомлення приходитимуть після першого /start. True — новий.
+        """
+        if not username or not self.settings.is_admin(None, username):
+            return False
+        remembered = self.storage.get_json(ADMIN_CHATS_KEY, {}) or {}
+        key = username.lower()
+        if remembered.get(key) == chat_id:
+            return False
+        remembered[key] = chat_id
+        self.storage.set_json(ADMIN_CHATS_KEY, remembered)
+        if self.bot is not None:
+            try:
+                await set_admin_commands(self.bot, chat_id)
+            except Exception as error:
+                logger.warning("Команди адміністратора %s: %s", chat_id, error)
+        return True
+
     async def notify_admins(self, text: str) -> None:
         if self.bot is None:
             logger.warning("Адміністраторам: %s", text)
             return
-        for chat_id in self.settings.admin_ids:
+        for chat_id in self.admin_chat_ids():
             try:
                 await self.bot.send_message(chat_id, text)
             except Exception as error:
@@ -136,21 +168,26 @@ def build_services(settings: Settings, with_bot: bool = True) -> Services:
     return services
 
 
+async def set_admin_commands(bot, chat_id: int) -> None:
+    from aiogram.types import BotCommand, BotCommandScopeChat
+
+    await bot.set_my_commands(
+        [BotCommand(command=c, description=d) for c, d in BOT_COMMANDS + ADMIN_COMMANDS],
+        scope=BotCommandScopeChat(chat_id=chat_id))
+
+
 async def setup_bot_profile(services: Services) -> None:
     """Команди й кнопка меню, що відкриває дашборд."""
-    from aiogram.types import (BotCommand, BotCommandScopeChat, MenuButtonDefault,
-                               MenuButtonWebApp, WebAppInfo)
+    from aiogram.types import BotCommand, MenuButtonDefault, MenuButtonWebApp, WebAppInfo
 
     bot = services.bot
     settings = services.settings
     if bot is None:
         return
     await bot.set_my_commands([BotCommand(command=c, description=d) for c, d in BOT_COMMANDS])
-    for admin in settings.admin_ids:
+    for admin in services.admin_chat_ids():
         try:
-            await bot.set_my_commands(
-                [BotCommand(command=c, description=d) for c, d in BOT_COMMANDS + ADMIN_COMMANDS],
-                scope=BotCommandScopeChat(chat_id=admin))
+            await set_admin_commands(bot, admin)
         except Exception as error:
             logger.warning("Команди адміністратора %s: %s", admin, error)
     if settings.has_webapp:

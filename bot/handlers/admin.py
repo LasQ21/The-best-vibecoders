@@ -15,7 +15,9 @@ router = Router(name="admin")
 
 class IsAdmin(Filter):
     async def __call__(self, message: Message, services: Services) -> bool:
-        return services.settings.is_admin(message.chat.id)
+        user = message.from_user
+        return services.is_admin_chat(message.chat.id, user.username if user else None,
+                                      private=message.chat.type == "private")
 
 
 @router.message(Command("update"), IsAdmin())

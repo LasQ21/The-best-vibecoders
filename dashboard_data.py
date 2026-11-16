@@ -164,6 +164,21 @@ def filter_tenders(tenders, filters, minimum_score=None):
     return tenders
 
 
+def matching_tenders(tenders, query="", signal="all"):
+    if signal != "all":
+        tenders = tenders.loc[tenders[signal].eq(1)]
+    if not query:
+        return tenders
+
+    query = query.casefold()
+    matches = (
+        tenders["title"].str.casefold().str.contains(query, regex=False, na=False)
+        | tenders["buyer_name"].str.casefold().str.contains(query, regex=False, na=False)
+        | tenders["tender_code"].str.casefold().str.contains(query, regex=False, na=False)
+    )
+    return tenders.loc[matches]
+
+
 def ranked_tenders(tenders, score_source):
     if score_source == "raw":
         return tenders.loc[tenders["single_bid_observed"]].sort_values("date_created", ascending=False)

@@ -8,8 +8,17 @@ IsolationForest дивиться на всі ознаки тендера раз�
 
 import numpy as np
 import pandas as pd
+from sklearn.ensemble import IsolationForest
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import StandardScaler
 
 from flags import COMPETITIVE_METHODS
+
+# --- Модель -----------------------------------------------------------------
+
+RANDOM_STATE = 42     # фіксуємо, щоб бал не стрибав між запусками й на демо
+N_ESTIMATORS = 200    # кількість дерев: більше = стабільніше, 200 рахується за секунди
+MIN_TENDERS_FOR_MODEL = 50   # на меншій вибірці «аномальність» нічого не означає
 
 # --- Ознаки -----------------------------------------------------------------
 
@@ -59,3 +68,51 @@ def build_features(tenders, flags):
     dummies = pd.get_dummies(competitive[CATEGORICAL_FEATURES].fillna("unknown"),
                              prefix=CATEGORICAL_FEATURES, dtype=float)
     return features.join(dummies)
+
+
+# --- Оцінка аномальності -------------------------------------------------------
+
+def fit_model(features):
+    """Навчає StandardScaler + IsolationForest на таблиці ознак.
+
+    StandardScaler зводить ознаки до одного масштабу (середнє 0, відхилення 1),
+    щоб сума в мільйонах не важила більше за кількість учасників.
+    """
+    model = make_pipeline(
+        StandardScaler(),
+        IsolationForest(n_estimators=N_ESTIMATORS, random_state=RANDOM_STATE),
+    )
+    return model.fit(features)
+
+
+def to_unit_scale(raw_scores):
+    """Сирі score_samples -> ml_score від 0 до 1, де 1 означає найаномальніший.
+
+    У score_samples менше значення = аномальніше, тому перевертаємо знак
+    і лінійно розтягуємо на [0, 1].
+    """
+    anomaly = -np.asarray(raw_scores, dtype=float)
+    span = anomaly.max() - anomaly.min()
+    if span == 0:
+        return np.zeros_like(anomaly)
+    return (anomaly - anomaly.min()) / span
+
+
+def anomaly_scores(tenders, flags):
+    """ML-оцінка для кожного тендера.
+
+    Вхід: tenders з data_loader.load_data(), flags з flags.compute_flags().
+    Вихід: tender_id, ml_score (0–1), ml_reason (поки порожній).
+    Модель вчиться лише на конкурентних тендерах; для reporting ml_score = 0.
+    """
+    result = tenders[["tender_id"]].drop_duplicates().set_index("tender_id")
+    result["ml_score"] = 0.0
+    result["ml_reason"] = ""
+
+    features = build_features(tenders, flags)
+    if len(features) >= MIN_TENDERS_FOR_MODEL:
+        model = fit_model(features)
+        result.loc[features.index, "ml_score"] = to_unit_scale(model.score_samples(features))
+
+    result["ml_score"] = result["ml_score"].round(3)
+    return result.reset_index()

@@ -5,6 +5,7 @@
 [project]
 name = "prozorro-radar-bot"
 version = "0.1.0"
+# Версія Python для функції Vercel. Локально сайт, бот і тести працюють з Python 3.11+ (див. README).
 requires-python = ">=3.12"
 dependencies = [
     "pandas==3.1.1",

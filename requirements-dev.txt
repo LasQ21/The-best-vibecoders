@@ -1,0 +1,4 @@
+# Для запуску тестів: python -m unittest discover tests
+# httpx потрібен тестовому клієнту FastAPI (tests/test_bot_web.py).
+-r requirements-bot.txt
+httpx==0.28.1

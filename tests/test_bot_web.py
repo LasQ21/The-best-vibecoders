@@ -6,7 +6,6 @@ import hmac
 import json
 import time
 import unittest
-from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 import numpy as np
@@ -21,7 +20,7 @@ from bot.storage import Storage
 from bot.web import figures
 from bot.web.auth import AuthError, authenticate
 from bot.web.server import create_app
-from bot_fixtures import NOW, TOKEN, default_rows, make_dashboard, temp_db_path, tender
+from bot_fixtures import TOKEN, default_rows, make_dashboard, temp_db_path, tender
 
 
 def init_data(token=TOKEN, user_id=777, auth_date=None, tamper=False):
@@ -171,6 +170,14 @@ class RoutesTest(unittest.TestCase):
         self.assertEqual(self.client.post("/cron/poll").status_code, 401)
         self.assertEqual(self.client.post("/cron/poll", headers={"Authorization": "Bearer wrong"}).status_code, 401)
 
+    def test_secret_is_not_accepted_in_query(self):
+        # Адреси потрапляють у логи доступу, тому ?key=… не приймаємо навіть з правильним секретом.
+        self.assertEqual(self.client.get("/cron/poll?key=cron-secret").status_code, 401)
+        self.assertEqual(self.client.get("/tg/setup?key=cron-secret").status_code, 401)
+        ok = self.client.get("/tg/setup", headers={"Authorization": "Bearer cron-secret"})
+        self.assertEqual(ok.status_code, 200)
+        self.assertEqual(ok.json(), {"webhook": "skipped"})
+
 
 class FiguresTest(unittest.TestCase):
     def test_dark_palette_leaves_no_light_colors(self):
@@ -189,10 +196,6 @@ class FiguresTest(unittest.TestCase):
     def test_mapping_is_built_from_charts_constants(self):
         self.assertIn(charts.SURFACE_COLOR.lower(), figures.palette("dark"))
         self.assertIn(charts.GRID_COLOR.lower(), figures.palette("dark"))
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class FakeBot:
@@ -235,3 +238,7 @@ class AutoWebhookTest(unittest.TestCase):
         services.bot = FakeBot()
         self.assertFalse(client.get("/healthz").json()["webhook_ready"])
         self.assertEqual(services.bot.calls, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

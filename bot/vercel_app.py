@@ -32,7 +32,7 @@ def _build() -> FastAPI:
         from .handlers import build_dispatcher
         dispatcher = build_dispatcher(services)
     else:
-        logger.warning("BOT_TOKEN не задано: працює лише дашборд без авторизації Telegram")
+        logger.warning("BOT_TOKEN не задано: бот вимкнений, а дашборд не зможе перевірити користувачів Telegram")
     return create_app(services, dispatcher)
 
 

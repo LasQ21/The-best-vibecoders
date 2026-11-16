@@ -11,14 +11,13 @@ import hmac
 import logging
 import math
 import os
-from datetime import datetime, timezone
+from contextlib import asynccontextmanager
 from pathlib import Path
 from urllib.parse import parse_qs, urlencode
 
-import pandas as pd
 import plotly
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 
@@ -112,11 +111,16 @@ def _int_param(request: Request, name: str, default: int = 0) -> int:
 
 
 def _check_secret(request: Request, secret: str) -> bool:
+    """Секрет приймаємо лише із заголовка «Authorization: Bearer …».
+
+    У query (?key=…) не приймаємо: адреси запитів потрапляють у логи доступу.
+    """
     if not secret:
         return False
     header = request.headers.get("authorization", "")
-    supplied = header[7:] if header.lower().startswith("bearer ") else request.query_params.get("key", "")
-    return hmac.compare_digest(supplied.encode(), secret.encode())
+    if not header.lower().startswith("bearer "):
+        return False
+    return hmac.compare_digest(header[7:].encode(), secret.encode())
 
 
 def public_base(services: Services) -> str:
@@ -124,83 +128,133 @@ def public_base(services: Services) -> str:
     return url[: -len("/app")] if url.endswith("/app") else url.rsplit("/", 1)[0]
 
 
-def create_app(services: Services, dispatcher=None) -> FastAPI:
-    settings = services.settings
-    env = make_env()
-    state = {"webhook_checked": False, "webhook_error": None}
-    webhook_lock = asyncio.Lock()
+def _tender_filters(request: Request) -> queries.TenderFilters:
+    min_score = _float_param(request, "min_score")
+    return queries.TenderFilters(
+        regions=_list_param(request, "region"), procedures=_list_param(request, "procedure"),
+        categories=_list_param(request, "category"),
+        flags=tuple(f for f in _list_param(request, "flag") if f in contract.FLAG_COLUMNS),
+        min_score=min_score if min_score and min_score > 0 else None,
+        buyer=request.query_params.get("buyer") or None,
+        since_hours=_int_param(request, "since_hours") or None)
 
-    from contextlib import asynccontextmanager
 
-    @asynccontextmanager
-    async def lifespan(_app):
-        if settings.on_vercel:
-            # Знімок починаємо вантажити одразу: перший запит чекатиме менше.
-            asyncio.get_running_loop().create_task(_warm_up())
-        yield
+def _filter_query(filters: queries.TenderFilters, offset: int) -> str:
+    params = [("region", v) for v in filters.regions] + [("procedure", v) for v in filters.procedures]
+    params += [("category", v) for v in filters.categories] + [("flag", v) for v in filters.flags]
+    if filters.min_score:
+        params.append(("min_score", int(filters.min_score)))
+    if filters.buyer:
+        params.append(("buyer", filters.buyer))
+    if filters.since_hours:
+        params.append(("since_hours", filters.since_hours))
+    params.append(("offset", offset))
+    return urlencode(params)
 
-    async def _warm_up():
+
+def _sub_from_form(base: Subscription, form: dict[str, list[str]]) -> Subscription:
+    def one(name, default):
+        values = form.get(name)
+        return values[0] if values else default
+
+    try:
+        min_score = float(one("min_score", base.min_score))
+    except ValueError:
+        min_score = base.min_score
+    try:
+        follow_min = float(one("follow_min_score", base.follow_min_score))
+    except ValueError:
+        follow_min = base.follow_min_score
+    flags = tuple(f for f in form.get("flag", []) if f in contract.FLAG_COLUMNS)
+    regions = tuple(dict.fromkeys(r for r in form.get("region", []) if r))
+    active = one("active", "0") in ("1", "on", "true")
+    return base.with_changes(active=active, min_score=min_score, follow_min_score=follow_min,
+                             flags=flags, regions=regions)
+
+
+class AppContext:
+    """Спільне для маршрутів одного застосунку: сервіси, шаблони, стан вебхука."""
+
+    def __init__(self, services: Services, dispatcher=None):
+        self.services = services
+        self.settings = services.settings
+        self.dispatcher = dispatcher
+        self.env = make_env()
+        self.state = {"webhook_checked": False, "webhook_error": None}
+        self.webhook_lock = asyncio.Lock()
+
+        async def require_user(request: Request) -> WebUser:
+            try:
+                return authenticate(self.settings, request.headers.get("authorization"))
+            except AuthError as error:
+                raise HTTPException(status_code=401, detail=error.reason) from error
+
+        self.require_user = require_user
+
+    def render(self, name: str, status: int = 200, **context) -> HTMLResponse:
+        html = self.env.get_template(name).render(**context)
+        return HTMLResponse(html, status_code=status,
+                            headers={"Cache-Control": "no-store", "Vary": "Authorization"})
+
+    async def snapshot(self):
         try:
-            await services.snapshots.get()
+            return await self.services.snapshots.get()
+        except Exception as error:
+            raise HTTPException(status_code=503, detail="Дані ще завантажуються, спробуйте за хвилину") \
+                from error
+
+    async def warm_up(self) -> None:
+        try:
+            await self.services.snapshots.get()
         except Exception:
             logger.exception("Не вдалося завантажити знімок при старті")
 
-    web = FastAPI(title="Prozorro radar", docs_url=None, redoc_url=None, openapi_url=None,
-                  lifespan=lifespan)
-    web.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+    async def ensure_webhook(self, force: bool = False) -> dict:
+        """На Vercel: вебхук, команди й кнопка меню (ідемпотентно)."""
+        bot = self.services.bot
+        if bot is None or not self.settings.webapp_url:
+            return {"webhook": "skipped"}
+        url = f"{public_base(self.services)}/tg/webhook"
+        info = await bot.get_webhook_info()
+        changed = False
+        if force or info.url != url:
+            await bot.set_webhook(url=url, secret_token=self.settings.webhook_secret,
+                                  allowed_updates=["message", "callback_query", "inline_query"],
+                                  drop_pending_updates=False)
+            changed = True
+        if force or changed:
+            from ..services import setup_bot_profile
+            await setup_bot_profile(self.services)
+        me = await bot.get_me()
+        self.services.extra["bot_username"] = me.username
+        self.state["webhook_checked"] = True
+        return {"webhook": url, "changed": changed}
 
-    async def auto_webhook() -> None:
+    async def auto_webhook(self) -> None:
         """На Vercel вебхук ставимо сам при першому запиті до production-деплою.
 
         Без цього Telegram не знає, куди слати повідомлення, а ручний /tg/setup
         легко забути. Ідемпотентно: getWebhookInfo, і set_webhook лише якщо адреса інша.
         """
-        if state["webhook_checked"] or not settings.on_vercel or dispatcher is None:
+        if self.state["webhook_checked"] or not self.settings.on_vercel or self.dispatcher is None:
             return
         if os.environ.get("VERCEL_ENV", "production") != "production":
             return
-        async with webhook_lock:
-            if state["webhook_checked"]:
+        async with self.webhook_lock:
+            if self.state["webhook_checked"]:
                 return
             try:
-                await asyncio.wait_for(ensure_webhook(), timeout=15)
-                state["webhook_error"] = None
+                await asyncio.wait_for(self.ensure_webhook(), timeout=15)
+                self.state["webhook_error"] = None
             except Exception as error:
-                state["webhook_error"] = type(error).__name__
+                self.state["webhook_error"] = type(error).__name__
                 logger.exception("Не вдалося автоматично налаштувати вебхук")
 
-    @web.middleware("http")
-    async def webhook_on_first_request(request: Request, call_next):
-        if not state["webhook_checked"] and not request.url.path.startswith(("/tg/", "/static/", "/vendor/")):
-            await auto_webhook()
-        return await call_next(request)
 
-    def render(name: str, status: int = 200, **context) -> HTMLResponse:
-        html = env.get_template(name).render(**context)
-        return HTMLResponse(html, status_code=status,
-                            headers={"Cache-Control": "no-store", "Vary": "Authorization"})
+# --- маршрути: оболонка і стан -------------------------------------------------------------
 
-    async def require_user(request: Request) -> WebUser:
-        try:
-            return authenticate(settings, request.headers.get("authorization"))
-        except AuthError as error:
-            raise HTTPException(status_code=401, detail=error.reason) from error
-
-    @web.exception_handler(HTTPException)
-    async def http_error(request: Request, error: HTTPException):
-        if request.url.path.startswith("/app/v/"):
-            return render("error.html", status=error.status_code, status_code=error.status_code,
-                          message=error.detail)
-        return JSONResponse({"detail": error.detail}, status_code=error.status_code)
-
-    async def snapshot():
-        try:
-            return await services.snapshots.get()
-        except Exception as error:
-            raise HTTPException(status_code=503, detail="Дані ще завантажуються, спробуйте за хвилину") \
-                from error
-
-    # --- оболонка ------------------------------------------------------------------------
+def _add_shell_routes(web: FastAPI, ctx: AppContext) -> None:
+    services, settings = ctx.services, ctx.settings
 
     @web.get("/", include_in_schema=False)
     async def root():
@@ -208,7 +262,7 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
 
     @web.get("/app", response_class=HTMLResponse)
     async def shell():
-        return render("shell.html", dev=settings.dev_auth_bypass)
+        return ctx.render("shell.html", dev=settings.dev_auth_bypass)
 
     @web.get("/vendor/plotly.min.js", include_in_schema=False)
     async def plotly_js():
@@ -227,12 +281,17 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
             "last_poll_success": status.get("last_success").isoformat() if status.get("last_success") else None,
             "mode": "vercel" if settings.on_vercel else "process",
             "bot": bool(settings.bot_token),
-            "webhook_ready": state["webhook_checked"],
-            "webhook_error": state["webhook_error"],
+            "webhook_ready": ctx.state["webhook_checked"],
+            "webhook_error": ctx.state["webhook_error"],
             "dashboard": bool(settings.webapp_url),
         }
 
-    # --- екрани ------------------------------------------------------------------------------
+
+# --- маршрути: екрани дашборда ---------------------------------------------------------------
+
+def _add_screen_routes(web: FastAPI, ctx: AppContext) -> None:
+    services, render, snapshot = ctx.services, ctx.render, ctx.snapshot
+    require_user = ctx.require_user
 
     @web.get("/app/v/overview", response_class=HTMLResponse)
     async def v_overview(user: WebUser = Depends(require_user)):
@@ -244,28 +303,6 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
                       snapshot=snap, last_success=status.get("last_success"), user=user,
                       max_flag=max(data["flag_counts"].values() or [1]),
                       max_bin=max([b["count"] for b in data["distribution"]] or [1]))
-
-    def _tender_filters(request: Request) -> queries.TenderFilters:
-        min_score = _float_param(request, "min_score")
-        return queries.TenderFilters(
-            regions=_list_param(request, "region"), procedures=_list_param(request, "procedure"),
-            categories=_list_param(request, "category"),
-            flags=tuple(f for f in _list_param(request, "flag") if f in contract.FLAG_COLUMNS),
-            min_score=min_score if min_score and min_score > 0 else None,
-            buyer=request.query_params.get("buyer") or None,
-            since_hours=_int_param(request, "since_hours") or None)
-
-    def _filter_query(filters: queries.TenderFilters, offset: int) -> str:
-        params = [("region", v) for v in filters.regions] + [("procedure", v) for v in filters.procedures]
-        params += [("category", v) for v in filters.categories] + [("flag", v) for v in filters.flags]
-        if filters.min_score:
-            params.append(("min_score", int(filters.min_score)))
-        if filters.buyer:
-            params.append(("buyer", filters.buyer))
-        if filters.since_hours:
-            params.append(("since_hours", filters.since_hours))
-        params.append(("offset", offset))
-        return urlencode(params)
 
     @web.get("/app/v/tenders", response_class=HTMLResponse)
     async def v_tenders(request: Request, user: WebUser = Depends(require_user)):
@@ -285,7 +322,7 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
             return render("tender_list.html", **context)
         return render("tenders.html", **context,
                       regions=queries.filter_options(snap, "buyer_region"),
-                      procedures=[p for p in queries.filter_options(snap, "procedure")],
+                      procedures=list(queries.filter_options(snap, "procedure")),
                       categories=queries.filter_options(snap, "category"))
 
     @web.get("/app/v/tenders/{tender_id}", response_class=HTMLResponse)
@@ -344,28 +381,21 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
         sub = services.storage.get_subscription(user.chat_id)
         return render("follow_button.html", edrpou=edrpou, followed=follow, sub=sub)
 
-    # --- сповіщення ------------------------------------------------------------------------------
+    @web.get("/app/v/about", response_class=HTMLResponse)
+    async def v_about(user: WebUser = Depends(require_user)):
+        snap = services.snapshots.current
+        return render("about.html", weights=scoring.WEIGHTS, threshold=scoring.HIGH_SCORE_THRESHOLD,
+                      flags_module=flags_module, scoring=scoring, snapshot=snap,
+                      min_buyer=scoring.MIN_BUYER_TENDERS)
 
-    def _sub_from_form(base: Subscription, form: dict[str, list[str]]) -> Subscription:
-        def one(name, default):
-            values = form.get(name)
-            return values[0] if values else default
 
-        try:
-            min_score = float(one("min_score", base.min_score))
-        except ValueError:
-            min_score = base.min_score
-        try:
-            follow_min = float(one("follow_min_score", base.follow_min_score))
-        except ValueError:
-            follow_min = base.follow_min_score
-        flags = tuple(f for f in form.get("flag", []) if f in contract.FLAG_COLUMNS)
-        regions = tuple(dict.fromkeys(r for r in form.get("region", []) if r))
-        active = one("active", "0") in ("1", "on", "true")
-        return base.with_changes(active=active, min_score=min_score, follow_min_score=follow_min,
-                                 flags=flags, regions=regions)
+# --- маршрути: сповіщення --------------------------------------------------------------------
 
-    async def _alerts_context(user: WebUser, sub: Subscription):
+def _add_alert_routes(web: FastAPI, ctx: AppContext) -> None:
+    services, settings, render, snapshot = ctx.services, ctx.settings, ctx.render, ctx.snapshot
+    require_user = ctx.require_user
+
+    async def alerts_context(user: WebUser, sub: Subscription):
         snap = await snapshot()
         recent = queries.recent_candidates(snap, 7)
         history = []
@@ -384,7 +414,7 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
     async def v_alerts(user: WebUser = Depends(require_user)):
         services.refresh_db()
         sub = services.storage.get_subscription(user.chat_id)
-        return render("alerts.html", **await _alerts_context(user, sub))
+        return render("alerts.html", **await alerts_context(user, sub))
 
     @web.put("/app/v/alerts", response_class=HTMLResponse)
     async def v_alerts_save(request: Request, user: WebUser = Depends(require_user)):
@@ -416,24 +446,22 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
         await services.flush()
         return HTMLResponse("")
 
-    @web.get("/app/v/about", response_class=HTMLResponse)
-    async def v_about(user: WebUser = Depends(require_user)):
-        snap = services.snapshots.current
-        return render("about.html", weights=scoring.WEIGHTS, threshold=scoring.HIGH_SCORE_THRESHOLD,
-                      flags_module=flags_module, scoring=scoring, snapshot=snap,
-                      min_buyer=scoring.MIN_BUYER_TENDERS)
 
-    # --- фігури ------------------------------------------------------------------------------
+# --- маршрути: графіки -----------------------------------------------------------------------
 
-    def fig_response(fig, theme: str):
-        return JSONResponse(figures.themed(fig, theme), headers={"Cache-Control": "private, max-age=300"})
+def _fig_response(fig, theme: str):
+    return JSONResponse(figures.themed(fig, theme), headers={"Cache-Control": "private, max-age=300"})
+
+
+def _add_figure_routes(web: FastAPI, ctx: AppContext) -> None:
+    snapshot, require_user = ctx.snapshot, ctx.require_user
 
     @web.get("/app/fig/scores")
     async def fig_scores(theme: str = "light", user: WebUser = Depends(require_user)):
         snap = await snapshot()
         tenders = snap.tenders
         competitive = tenders.loc[tenders["method_type"].isin(contract.COMPETITIVE_METHODS), "total_score"]
-        return fig_response(figures.score_distribution(competitive, snap.threshold), theme)
+        return _fig_response(figures.score_distribution(competitive, snap.threshold), theme)
 
     @web.get("/app/fig/price")
     async def fig_price(tender_id: str, item_id: str, basis: str | None = None, theme: str = "light",
@@ -444,13 +472,13 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Позицію не знайдено")
         prices, median, _ratio, selected, _method = found
         fig = charts.price_histogram(prices, median, highlight=selected["unit_price"])
-        return fig_response(figures.compact(fig, height=340), theme)
+        return _fig_response(figures.compact(fig, height=340), theme)
 
     @web.get("/app/fig/buyer/{edrpou}/winners")
     async def fig_winners(edrpou: str, theme: str = "light", user: WebUser = Depends(require_user)):
         snap = await snapshot()
         own = queries.buyer_tenders(snap, edrpou)
-        return fig_response(figures.compact(charts.top_winners(own, n=8)), theme)
+        return _fig_response(figures.compact(charts.top_winners(own, n=8)), theme)
 
     @web.get("/app/fig/buyer/{edrpou}/timeline")
     async def fig_timeline(edrpou: str, freq: str = "W", theme: str = "light",
@@ -458,30 +486,13 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
         snap = await snapshot()
         own = queries.buyer_tenders(snap, edrpou)
         freq = freq if freq in ("D", "W", "M") else "W"
-        return fig_response(figures.compact(charts.purchases_over_time(own, freq=freq), height=420), theme)
+        return _fig_response(figures.compact(charts.purchases_over_time(own, freq=freq), height=420), theme)
 
-    # --- Telegram і планувальник -----------------------------------------------------------------
 
-    async def ensure_webhook(force: bool = False) -> dict:
-        """На Vercel: вебхук, команди й кнопка меню (ідемпотентно)."""
-        bot = services.bot
-        if bot is None or not settings.webapp_url:
-            return {"webhook": "skipped"}
-        url = f"{public_base(services)}/tg/webhook"
-        info = await bot.get_webhook_info()
-        changed = False
-        if force or info.url != url:
-            await bot.set_webhook(url=url, secret_token=settings.webhook_secret,
-                                  allowed_updates=["message", "callback_query", "inline_query"],
-                                  drop_pending_updates=False)
-            changed = True
-        if force or changed:
-            from ..services import setup_bot_profile
-            await setup_bot_profile(services)
-        me = await bot.get_me()
-        services.extra["bot_username"] = me.username
-        state["webhook_checked"] = True
-        return {"webhook": url, "changed": changed}
+# --- маршрути: Telegram і планувальник -------------------------------------------------------
+
+def _add_service_routes(web: FastAPI, ctx: AppContext) -> None:
+    services, settings, dispatcher = ctx.services, ctx.settings, ctx.dispatcher
 
     if dispatcher is not None:
         @web.post("/tg/webhook", include_in_schema=False)
@@ -503,9 +514,9 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
         if not _check_secret(request, settings.cron_secret):
             raise HTTPException(status_code=401, detail="unauthorized")
         setup = None
-        if not state["webhook_checked"] and settings.on_vercel:
+        if not ctx.state["webhook_checked"] and settings.on_vercel:
             try:
-                setup = await ensure_webhook()
+                setup = await ctx.ensure_webhook()
             except Exception as error:
                 logger.exception("Не вдалося налаштувати вебхук")
                 setup = {"error": str(error)}
@@ -517,7 +528,43 @@ def create_app(services: Services, dispatcher=None) -> FastAPI:
     async def tg_setup(request: Request):
         if not _check_secret(request, settings.cron_secret):
             raise HTTPException(status_code=401, detail="unauthorized")
-        return await ensure_webhook(force=True)
+        return await ctx.ensure_webhook(force=True)
+
+
+# --- застосунок ------------------------------------------------------------------------------
+
+def create_app(services: Services, dispatcher=None) -> FastAPI:
+    ctx = AppContext(services, dispatcher)
+
+    @asynccontextmanager
+    async def lifespan(_app):
+        if ctx.settings.on_vercel:
+            # Знімок починаємо вантажити одразу: перший запит чекатиме менше.
+            asyncio.get_running_loop().create_task(ctx.warm_up())
+        yield
+
+    web = FastAPI(title="Prozorro radar", docs_url=None, redoc_url=None, openapi_url=None,
+                  lifespan=lifespan)
+    web.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+    @web.middleware("http")
+    async def webhook_on_first_request(request: Request, call_next):
+        if not ctx.state["webhook_checked"] and not request.url.path.startswith(("/tg/", "/static/", "/vendor/")):
+            await ctx.auto_webhook()
+        return await call_next(request)
+
+    @web.exception_handler(HTTPException)
+    async def http_error(request: Request, error: HTTPException):
+        if request.url.path.startswith("/app/v/"):
+            return ctx.render("error.html", status=error.status_code, status_code=error.status_code,
+                              message=error.detail)
+        return JSONResponse({"detail": error.detail}, status_code=error.status_code)
+
+    _add_shell_routes(web, ctx)
+    _add_screen_routes(web, ctx)
+    _add_alert_routes(web, ctx)
+    _add_figure_routes(web, ctx)
+    _add_service_routes(web, ctx)
 
     web.state.services = services
     return web

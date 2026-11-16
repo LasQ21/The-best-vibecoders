@@ -1,14 +1,17 @@
 """Streamlit interface for the Prozorro procurement dashboard."""
 
 import logging
+import math
+import threading
+import time
 from html import escape
 
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
-from app import PROZORRO_TENDER_URL
 import dashboard_data as data
+from dashboard_format import compact_money, money, number, percent, tender_link, text_value
 
 PAGES = ("Огляд", "Топ тендерів", "Замовники", "Ціни на товар")
 PAGE_ICONS = (":material/space_dashboard:", ":material/radar:", ":material/apartment:", ":material/monitoring:")
@@ -28,50 +31,15 @@ SIGNALS = {
 }
 PROCEDURE_COLORS = ("#1d6b55", "#9dcb54", "#f1bc69", "#6d91bd")
 TELEGRAM_BOT = "prozzoro_detector_bot"
+TELEGRAM_URL = f"https://t.me/{TELEGRAM_BOT}"
+TELEGRAM_QR = data.ROOT / "assets" / "telegram-bot-qr.png"
+UPDATE_COOLDOWN_SEC = 300  # не частіше ніж раз на 5 хвилин для всіх відвідувачів разом
 LOGGER = logging.getLogger(__name__)
 
 
 @st.cache_data(show_spinner="Завантажуємо дані Prozorro…")
 def snapshot():
     return data.load_dashboard()
-
-
-def text_value(value, fallback="—"):
-    return str(value) if pd.notna(value) and str(value).strip() else fallback
-
-
-def number(value, decimals=0):
-    if pd.isna(value):
-        return "—"
-    return f"{value:,.{decimals}f}".replace(",", "\u202f").replace(".", ",")
-
-
-def percent(value):
-    return "—" if pd.isna(value) else f"{number(value * 100, 1)}%"
-
-
-def money(value, currency="UAH"):
-    if pd.isna(value):
-        return "—"
-    unit = {"UAH": "грн", "EUR": "EUR", "USD": "USD"}.get(currency, currency)
-    decimals = 2 if abs(value) < 1000 else 0
-    return f"{number(value, decimals)} {unit}"
-
-
-def compact_money(value):
-    if pd.isna(value):
-        return "—"
-    if abs(value) >= 1_000_000_000:
-        return f"{number(value / 1_000_000_000, 2)} млрд ₴"
-    if abs(value) >= 1_000_000:
-        return f"{number(value / 1_000_000, 2)} млн ₴"
-    return money(value)
-
-
-def tender_link(code):
-    if pd.notna(code) and str(code).startswith("UA-"):
-        return PROZORRO_TENDER_URL.format(tender_code=code)
-    return None
 
 
 def change_page(page, tender_id=None, signal="all"):
@@ -100,26 +68,55 @@ def cards(values):
             st.caption(note)
 
 
+@st.cache_resource
+def update_gate():
+    """Спільний для всіх сесій сайту замок і час останнього оновлення.
+
+    Сайт публічний: без цього кожен відвідувач міг би запускати завантаження з Prozorro
+    і перезапис CSV, зокрема кілька разів одночасно.
+    """
+    return {"lock": threading.Lock(), "last": None}
+
+
+def fetch_notice():
+    """Завантажує оновлення. Повертає текст для успішного результату або None."""
+    updater = data.optional_module("updater")
+    if updater is None:
+        st.info("Модуль оновлення ще не підключено. Відображаються збережені дані.")
+        return None
+    fetch_updates = getattr(updater, "fetch_updates", None)
+    if fetch_updates is None:
+        st.info("Читання фіду Prozorro підключено. Запис оновлень до CSV ще в розробці.")
+        return None
+    with st.spinner("Перевіряємо оновлення Prozorro…"):
+        result = fetch_updates()
+    if not result.ok:
+        st.warning(result.message or "Prozorro недоступний. Відображаються збережені дані.")
+        return None
+    status = f"Додано {number(result.added)}, оновлено {number(result.updated)}."
+    return f"{status} {result.message}".strip()
+
+
 def update_data():
+    gate = update_gate()
+    if gate["last"] is not None:
+        wait = UPDATE_COOLDOWN_SEC - (time.monotonic() - gate["last"])
+        if wait > 0:
+            st.info(f"Дані щойно оновлювали. Спробуй ще раз за {math.ceil(wait / 60)} хв.")
+            return
+    if not gate["lock"].acquire(blocking=False):
+        st.info("Оновлення вже триває. Спробуй ще раз за хвилину.")
+        return
     try:
-        updater = data.optional_module("updater")
-        if updater is None:
-            st.info("Модуль оновлення ще не підключено. Відображаються збережені дані.")
-            return
-        fetch_updates = getattr(updater, "fetch_updates", None)
-        if fetch_updates is None:
-            st.info("Читання фіду Prozorro підключено. Запис оновлень до CSV ще в розробці.")
-            return
-        with st.spinner("Перевіряємо оновлення Prozorro…"):
-            result = fetch_updates()
-        if not result.ok:
-            st.warning(result.message or "Prozorro недоступний. Відображаються збережені дані.")
-            return
-        status = f"Додано {number(result.added)}, оновлено {number(result.updated)}."
-        notice = f"{status} {result.message}".strip()
+        notice = fetch_notice()
     except Exception:
         LOGGER.exception("Prozorro data update failed")
         st.warning("Не вдалося оновити дані. Відображаються збережені закупівлі.")
+        return
+    finally:
+        gate["last"] = time.monotonic()
+        gate["lock"].release()
+    if notice is None:
         return
     snapshot.clear()
     st.session_state["update_notice"] = notice
@@ -156,6 +153,11 @@ def sidebar(dataset):
         if notice:
             st.success(notice)
         st.toggle("Анімації", value=True, key="motion_enabled")
+        if st.session_state["page"] != "Огляд":  # на «Огляді» є повний блок з QR
+            st.divider()
+            with st.container(key="sidebar_telegram"):
+                st.image(TELEGRAM_QR, width="stretch")
+                st.link_button("Telegram-бот", TELEGRAM_URL, icon=":material/send:", width="stretch")
 
 
 def tender_table(tenders, limit=100, selectable=False, focus=None):
@@ -238,6 +240,19 @@ def bars(counts, buyer_tenders=None):
     })
 
 
+def telegram_block():
+    with st.container(key="pulse_telegram", horizontal=True, vertical_alignment="center", gap="medium"):
+        st.image(TELEGRAM_QR, width=168)
+        with st.container(width="content"):
+            st.subheader("Детектор тендерів у Telegram")
+            st.markdown(
+                "Сповіщення про нові тендери з високим балом, дашборд і пошук за кодом `UA-…` "
+                "чи ЄДРПОУ просто в чаті."
+            )
+            st.caption(f"Наведи камеру телефона на QR-код або відкрий @{TELEGRAM_BOT}.")
+            st.link_button("Відкрити в Telegram", TELEGRAM_URL, icon=":material/open_in_new:")
+
+
 def show_overview(dataset):
     tenders = dataset.tenders
     metrics = data.overview_metrics(tenders, dataset.high_threshold)
@@ -272,12 +287,7 @@ def show_overview(dataset):
         ("Високий ризик", number(metrics["high_risk"]), high_note),
         ("Сума високого ризику", compact_money(metrics["high_value"]), "Фінальна вартість у гривнях"),
     ])
-    with st.container(key="pulse_telegram", horizontal=True, vertical_alignment="center", gap="medium"):
-        st.image(data.ROOT / "assets" / "telegram-bot-qr.png", width=152)
-        with st.container(width="content"):
-            st.subheader("Бот у Telegram")
-            st.caption(f"Наведи камеру на QR-код, щоб відкрити @{TELEGRAM_BOT}.")
-            st.link_button("Відкрити в Telegram", f"https://t.me/{TELEGRAM_BOT}", icon=":material/open_in_new:")
+    telegram_block()
     left, right = st.columns([1.65, 1], gap="medium")
     with left, st.container(key="pulse_discover"):
         st.subheader("Першими до перевірки" if dataset.score_source != "raw" else "Закупівлі з однією пропозицією")
@@ -518,8 +528,8 @@ def price_chart(prices, median, selected, currency):
     })
 
 
-def show_prices(dataset):
-    heading("ПОРІВНЯННЯ", "Ціни на товар", "Зістав ціну за одиницю з іншими позиціями того самого профілю або CPV-коду.")
+def price_candidates(dataset):
+    """Позиції для порівняння: з вибраного тендера або за пошуком. None — показувати нічого."""
     items = dataset.price_items
     tender_id = st.session_state.get("price_tender")
     if tender_id:
@@ -527,28 +537,28 @@ def show_prices(dataset):
         if tenders.empty:
             st.info("Закупівлю не знайдено в поточній вибірці.")
             st.button("Шукати серед усіх товарів", key="reset_price_tender", on_click=change_page, args=("Ціни на товар",))
-            return
+            return None
         tender = tenders.iloc[0]
         with st.container(border=True):
             st.caption(f"Вибраний тендер · {text_value(tender['tender_code'])}")
             st.write(text_value(tender["title"]))
             st.button("Шукати серед усіх товарів", key="clear_price_tender", on_click=change_page, args=("Ціни на товар",))
-        matched = data.matching_items(items, tender_id=tender_id)
-    else:
-        query = st.text_input(
-            "Назва товару, код CPV або ID профілю", placeholder="Наприклад, папір",
-            icon=":material/search:", key="item_search",
-        ).strip()
-        if not query:
-            search_examples("Товари у вибірці", "item_search", [
-                ("Папір", "папір"),
-                ("Електрична енергія", "електрична енергія"),
-            ])
-            return
-        matched = data.matching_items(items, query)
-    if matched.empty:
-        st.info("Порівнюваних позицій із відомою ціною за одиницю не знайдено.")
-        return
+        return data.matching_items(items, tender_id=tender_id)
+    query = st.text_input(
+        "Назва товару, код CPV або ID профілю", placeholder="Наприклад, папір",
+        icon=":material/search:", key="item_search",
+    ).strip()
+    if not query:
+        search_examples("Товари у вибірці", "item_search", [
+            ("Папір", "папір"),
+            ("Електрична енергія", "електрична енергія"),
+        ])
+        return None
+    return data.matching_items(items, query)
+
+
+def choose_item(dataset, matched):
+    """Список позицій (до 150) і вибір однієї. Повертає (ключ, рядок позиції)."""
     if len(matched) > 150:
         st.caption("Показано перші 150 позицій. Уточни пошук за назвою або кодом.")
     choices = matched.head(150).set_index(["tender_id", "item_id"])
@@ -564,7 +574,34 @@ def show_prices(dataset):
         "Позиція для порівняння", choices.index.tolist(),
         format_func=item_label, key="price_item",
     )
-    selected = choices.loc[item_key]
+    return item_key, choices.loc[item_key]
+
+
+def price_distribution(prices, median, selected, method, price_basis):
+    with st.container(border=True):
+        st.subheader("Розподіл цін за одиницю")
+        if len(prices) < 2:
+            st.info("У групі лише одна позиція. Для розподілу потрібна принаймні ще одна.")
+        else:
+            price_chart(prices, median, selected["unit_price"], selected["currency"])
+        group_id = selected["profile_id"] if method == "profile" else selected["cpv_id"]
+        if method == "cpv":
+            st.caption(f"CPV {group_id} дає ширше порівняння і може містити різні товари.")
+        if method != price_basis:
+            st.caption("Довідкове порівняння. Для бала ризику ядро використовує розрахунок за профілем товару.")
+        if len(prices) < 20:
+            st.caption("Вибірка має менше 20 позицій. Медіана наведена як орієнтир.")
+
+
+def show_prices(dataset):
+    heading("ПОРІВНЯННЯ", "Ціни на товар", "Зістав ціну за одиницю з іншими позиціями того самого профілю або CPV-коду.")
+    matched = price_candidates(dataset)
+    if matched is None:
+        return
+    if matched.empty:
+        st.info("Порівнюваних позицій із відомою ціною за одиницю не знайдено.")
+        return
+    item_key, selected = choose_item(dataset, matched)
     methods = [key for key, field in (("profile", "profile_id"), ("cpv", "cpv_id")) if pd.notna(selected[field])]
     if not methods:
         st.info("Позиція не має профілю або CPV-коду для порівняння.")
@@ -575,26 +612,14 @@ def show_prices(dataset):
         "Спосіб порівняння", methods, default=price_basis if price_basis in methods else methods[0],
         required=True, format_func=labels.get, key=f"price_method_{item_key[0]}_{item_key[1]}",
     )
-    prices, median, ratio = data.price_comparison(items, selected, method)
+    prices, median, ratio = data.price_comparison(dataset.price_items, selected, method)
     currency = selected["currency"]
     cards([
         ("Вибрана ціна", money(selected["unit_price"], currency), f"За одиницю · {text_value(selected['unit_name'])}"),
         ("Медіана", money(median, currency), f"У групі з {number(len(prices))} позицій"),
         ("До медіани", f"×{number(ratio, 2)}" if pd.notna(ratio) else "—", "Вибрана ціна, поділена на медіану"),
     ])
-    with st.container(border=True):
-        st.subheader("Розподіл цін за одиницю")
-        if len(prices) < 2:
-            st.info("У групі лише одна позиція. Для розподілу потрібна принаймні ще одна.")
-        else:
-            price_chart(prices, median, selected["unit_price"], currency)
-        group_id = selected["profile_id"] if method == "profile" else selected["cpv_id"]
-        if method == "cpv":
-            st.caption(f"CPV {group_id} дає ширше порівняння і може містити різні товари.")
-        if method != price_basis:
-            st.caption("Довідкове порівняння. Для бала ризику ядро використовує розрахунок за профілем товару.")
-        if len(prices) < 20:
-            st.caption("Вибірка має менше 20 позицій. Медіана наведена як орієнтир.")
+    price_distribution(prices, median, selected, method, price_basis)
 
 
 def main():

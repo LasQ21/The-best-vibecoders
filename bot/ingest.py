@@ -25,7 +25,7 @@ import pandas as pd
 import app as contract
 import updater
 
-from .config import ALERT_WINDOW_HOURS, FAILURES_BEFORE_ADMIN_ALERT, SLOW_RELOAD_SEC
+from .config import FAILURES_BEFORE_ADMIN_ALERT, SLOW_RELOAD_SEC
 from .storage import iso, parse_iso
 
 logger = logging.getLogger(__name__)

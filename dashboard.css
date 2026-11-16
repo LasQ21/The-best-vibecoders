@@ -553,10 +553,16 @@
     box-shadow: 0 4px 16px #243e240b;
 }
 
-.st-key-pulse_telegram [data-testid="stImage"] {
+.st-key-pulse_telegram [data-testid="stImage"],
+.st-key-sidebar_telegram [data-testid="stImage"] {
     border: 1px solid var(--line);
     border-radius: .8rem;
     overflow: hidden;
+    background: #fff;
+}
+
+.st-key-pulse_telegram p {
+    max-width: 38rem;
 }
 
 .st-key-pulse_discover:hover, .st-key-pulse_procedures:hover {
@@ -803,6 +809,8 @@
     .st-key-pulse_hero_actions button { min-height: 3.15rem; }
     .st-key-pulse_discover, .st-key-pulse_procedures { min-height: auto; }
     .st-key-pulse_hero::before, .st-key-pulse_hero::after { display: none; }
+    /* На телефоні QR не відскануєш з того самого екрана: лишаємо кнопку. */
+    .st-key-pulse_telegram [data-testid="stImage"] { display: none; }
 }
 
 @supports (animation-timeline: view()) {

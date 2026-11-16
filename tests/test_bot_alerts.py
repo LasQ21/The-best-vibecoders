@@ -4,8 +4,6 @@ import asyncio
 import unittest
 from datetime import timedelta
 
-import pandas as pd
-
 from bot import alerts
 from bot.storage import Storage, Subscription
 from bot_fixtures import NOW, make_tenders, temp_db_path, tender

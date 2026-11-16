@@ -178,7 +178,10 @@ def validate_scores(df):
 # --- Інтерфейс Streamlit ----------------------------------------------------
 
 def main():
-    """Інтерфейс сайту (Особа 3)."""
+    """Open the dashboard without loading Streamlit during contract imports."""
+    from dashboard_ui import main as show_dashboard
+
+    show_dashboard()
 
 
 if __name__ == "__main__":

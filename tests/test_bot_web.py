@@ -35,6 +35,28 @@ def init_data(token=TOKEN, user_id=777, auth_date=None, tamper=False):
     return urlencode(fields)
 
 
+class AdminConfigTest(unittest.TestCase):
+    def test_ids_and_usernames(self):
+        settings = load_settings({"ADMIN_IDS": "123, @Bohdan_K, other_admin"})
+        self.assertEqual(settings.admin_ids, frozenset({123}))
+        self.assertTrue(settings.is_admin(None, "bohdan_k"))
+        self.assertTrue(settings.is_admin(123))
+        self.assertFalse(settings.is_admin(5, "someone"))
+
+    def test_links_are_accepted_and_garbage_is_skipped(self):
+        settings = load_settings({"ADMIN_IDS": "https://t.me/q4r8t7, t.me/Ivan_P/, @a b, 42"})
+        self.assertEqual(settings.admin_usernames, frozenset({"q4r8t7", "ivan_p"}))
+        self.assertEqual(settings.admin_ids, frozenset({42}))
+
+    def test_username_admin_chat_is_remembered(self):
+        _client, services = make_client(admin_usernames=frozenset({"bohdan"}))
+        self.assertFalse(services.is_admin_chat(42, None))
+        self.assertTrue(asyncio.run(services.remember_admin(42, "Bohdan")))
+        self.assertIn(42, services.admin_chat_ids())
+        self.assertTrue(services.is_admin_chat(42, None))
+        self.assertFalse(asyncio.run(services.remember_admin(43, "stranger")))
+
+
 class AuthTest(unittest.TestCase):
     settings = Settings(bot_token=TOKEN)
 
@@ -171,3 +193,45 @@ class FiguresTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeBot:
+    def __init__(self):
+        self.calls = []
+
+    async def get_webhook_info(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(url="")
+
+    async def set_webhook(self, **kwargs):
+        self.calls.append(("set_webhook", kwargs))
+
+    async def get_me(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(username="radar_bot")
+
+    async def set_my_commands(self, *args, **kwargs):
+        self.calls.append(("set_my_commands", kwargs))
+
+    async def set_chat_menu_button(self, **kwargs):
+        self.calls.append(("set_chat_menu_button", kwargs))
+
+
+class AutoWebhookTest(unittest.TestCase):
+    def test_first_request_sets_webhook_once(self):
+        client, services = make_client(dispatcher=object(), on_vercel=True)
+        services.bot = FakeBot()
+        first = client.get("/healthz").json()
+        client.get("/app")
+        self.assertTrue(first["webhook_ready"])
+        hooks = [kwargs for name, kwargs in services.bot.calls if name == "set_webhook"]
+        self.assertEqual(len(hooks), 1)
+        self.assertEqual(hooks[0]["url"], "https://example.test/tg/webhook")
+        self.assertEqual(hooks[0]["secret_token"], services.settings.webhook_secret)
+        self.assertIn("set_chat_menu_button", [name for name, _ in services.bot.calls])
+
+    def test_not_on_vercel_does_nothing(self):
+        client, services = make_client(dispatcher=object())
+        services.bot = FakeBot()
+        self.assertFalse(client.get("/healthz").json()["webhook_ready"])
+        self.assertEqual(services.bot.calls, [])

@@ -9,7 +9,9 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
@@ -55,16 +57,30 @@ def _int(env, key, default):
         raise ConfigError(f"{key} має бути цілим числом") from error
 
 
-def _ids(raw: str) -> frozenset[int]:
-    ids = set()
+USERNAME_RE = re.compile(r"^@?([A-Za-z][A-Za-z0-9_]{3,31})$")
+LINK_PREFIX_RE = re.compile(r"^(?:https?://)?(?:www\.)?(?:t|telegram)\.me/", re.IGNORECASE)
+
+
+def _admins(raw: str) -> tuple[frozenset[int], frozenset[str], list[str]]:
+    """ADMIN_IDS: chat_id, юзернейми чи посилання t.me через кому: «123, @bohdan, t.me/ivan».
+
+    Повертає (chat_id, юзернейми, нерозпізнані записи). Помилка в одному записі
+    не зупиняє бота: такий запис пропускаємо й пишемо в лог.
+    """
+    ids, usernames, invalid = set(), set(), []
     for part in (raw or "").replace(";", ",").split(","):
-        part = part.strip()
-        if part:
-            try:
-                ids.add(int(part))
-            except ValueError as error:
-                raise ConfigError("ADMIN_IDS — це chat_id через кому") from error
-    return frozenset(ids)
+        part = LINK_PREFIX_RE.sub("", part.strip()).strip().strip("/")
+        if not part:
+            continue
+        if part.lstrip("-").isdigit():
+            ids.add(int(part))
+            continue
+        match = USERNAME_RE.match(part)
+        if match:
+            usernames.add(match.group(1).lower())
+        else:
+            invalid.append(part)
+    return frozenset(ids), frozenset(usernames), invalid
 
 
 @dataclass(frozen=True)
@@ -72,6 +88,7 @@ class Settings:
     bot_token: str = ""
     webapp_url: str = ""
     admin_ids: frozenset[int] = field(default_factory=frozenset)
+    admin_usernames: frozenset[str] = field(default_factory=frozenset)
     bot_env: str = "prod"
     poll_interval_sec: int = DEFAULT_POLL_INTERVAL_SEC
     poll_limit: int = DEFAULT_POLL_LIMIT
@@ -99,8 +116,11 @@ class Settings:
             return ""
         return hashlib.sha256(f"webhook:{self.bot_token}".encode()).hexdigest()[:48]
 
-    def is_admin(self, chat_id: int | None) -> bool:
-        return chat_id is not None and chat_id in self.admin_ids
+    def is_admin(self, chat_id: int | None, username: str | None = None) -> bool:
+        """Адміністратор за chat_id або за юзернеймом (юзернейм — лише в приватному чаті)."""
+        if chat_id is not None and chat_id in self.admin_ids:
+            return True
+        return bool(username) and username.lower() in self.admin_usernames
 
     def webapp_link(self, screen: str = "") -> str:
         """Адреса Mini App, що одразу відкриває потрібний екран (?s=tender/<id>).
@@ -119,6 +139,10 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     """Збирає Settings з .env і змінних оточення (оточення важливіше)."""
     if env is None:
         env = {**read_env_file(), **os.environ}
+    admin_ids, admin_usernames, invalid_admins = _admins(env.get("ADMIN_IDS", ""))
+    if invalid_admins:
+        logging.getLogger(__name__).warning(
+            "ADMIN_IDS: пропущено %s — це не chat_id і не юзернейм Telegram", invalid_admins)
     on_vercel = bool(env.get("VERCEL"))
     webapp_url = env.get("WEBAPP_URL", "").strip().rstrip("/")
     production_host = env.get("VERCEL_PROJECT_PRODUCTION_URL", "").strip()
@@ -133,7 +157,8 @@ def load_settings(env: dict[str, str] | None = None) -> Settings:
     settings = Settings(
         bot_token=env.get("BOT_TOKEN", "").strip(),
         webapp_url=webapp_url,
-        admin_ids=_ids(env.get("ADMIN_IDS", "")),
+        admin_ids=admin_ids,
+        admin_usernames=admin_usernames,
         bot_env=(env.get("BOT_ENV", "") or "prod").strip().lower(),
         poll_interval_sec=max(30, _int(env, "POLL_INTERVAL_SEC", DEFAULT_POLL_INTERVAL_SEC)),
         poll_limit=max(1, _int(env, "POLL_LIMIT", DEFAULT_POLL_LIMIT)),

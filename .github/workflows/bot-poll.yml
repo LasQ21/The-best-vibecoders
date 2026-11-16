@@ -1,0 +1,27 @@
+# Планувальник опитування Prozorro для бота на Vercel.
+# Функція Vercel живе лише під час запиту, тож раз на 5 хвилин її «будимо» запитом /cron/poll.
+# Потрібен секрет репозиторію CRON_SECRET (той самий, що в змінних Vercel).
+# Адресу можна змінити змінною репозиторію BOT_BASE_URL.
+name: Bot poll
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: bot-poll
+  cancel-in-progress: false
+
+jobs:
+  poll:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - name: Call /cron/poll
+        env:
+          CRON_SECRET: ${{ secrets.CRON_SECRET }}
+          BASE_URL: ${{ vars.BOT_BASE_URL || 'https://thebestvibecoders-the-best-team1.vercel.app' }}
+        run: |
+          if [ -z "$CRON_SECRET" ]; then echo "CRON_SECRET не задано"; exit 0; fi
+          curl -fsS --max-time 320 -X POST -H "Authorization: Bearer $CRON_SECRET" "$BASE_URL/cron/poll" | head -c 2000
